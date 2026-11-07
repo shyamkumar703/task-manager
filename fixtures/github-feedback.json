@@ -1,0 +1,18 @@
+[
+  {
+    "integration": "github",
+    "sourceID": "fixture:review-comment:1",
+    "revision": "v1",
+    "associationKey": "github:shyamkumar703/todo_list_test_task_manager:pr:1",
+    "body": "Please reject empty todo titles and add a regression test.",
+    "url": "https://github.com/shyamkumar703/todo_list_test_task_manager/pull/1#discussion_r1"
+  },
+  {
+    "integration": "github",
+    "sourceID": "fixture:issue-comment:2",
+    "revision": "v1",
+    "associationKey": "github:shyamkumar703/todo_list_test_task_manager:pr:1",
+    "body": "Follow-up: whitespace-only titles should be rejected too.",
+    "url": "https://github.com/shyamkumar703/todo_list_test_task_manager/pull/1#issuecomment-2"
+  }
+]
