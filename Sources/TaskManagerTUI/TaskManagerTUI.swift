@@ -334,6 +334,7 @@ public final class TaskManagerTUI {
         case 120:
             guard task.status.canTransition(to: .cancelled) else { notice = "This task is already finished; d removes it from the list."; return }
             try await store.transition(task.id, to: .cancelled); notice = "Task cancelled"; try await reload()
+        case 111: try await openWorkspace(task.id)
         case 116: try await openTerminal(task.id)
         default: break
         }
@@ -397,9 +398,22 @@ public final class TaskManagerTUI {
         selectedTaskID = id; page = .home; navigation.sidebar(.work, task: true); navigation.focus = .detail
         try await loadTranscript()
     }
+    private func openWorkspace(_ id: String) async throws {
+        notice = "Opening editor, shared Codex, and shell in tmux…"; draw()
+        let workspace = try await TaskWorkspace.load(store: store, taskID: id, stateDirectory: stateDirectory)
+        let session = try await workspace.prepareTmux()
+        tm_terminal_close()
+        do {
+            try await TaskWorkspace.focus(session: session)
+            notice = "Workspace \(session). Manager continues observing and forwarding source messages."
+        } catch { notice = "Workspace error: \(error)" }
+        tm_terminal_reclaim_foreground()
+        guard tm_terminal_open() == 0 else { running = false; throw ManagerError.invalid("Could not restore terminal UI") }
+        try await reload()
+    }
     private func openTerminal(_ id: String) async throws {
         notice = "Pausing child and opening its worktree terminal…"; draw()
-        let handoff = try await ManualTerminal.prepare(store: store, taskID: id)
+        let handoff = try await ManualTerminal.prepare(store: store, taskID: id, stateDirectory: stateDirectory)
         tm_terminal_close()
         do {
             _ = try await ManualTerminal.runShell(session: handoff); try await store.releaseTerminal(taskID: id)
@@ -527,7 +541,7 @@ public final class TaskManagerTUI {
         if task.status != .cancelled { commands.append("m: message") }
         if ![TaskStatus.cancelled, .completed, .failed].contains(task.status), questions.contains(where: { $0.taskID == task.id && $0.answer == nil }) { commands.append("a: answer") }
         if task.status == .paused || task.status.canTransition(to: .paused) { commands.append(task.status == .paused ? "p: resume" : "p: pause") }
-        if session?.workspace != nil { commands.append("t: terminal") }
+        if session?.workspace != nil { commands.append("o: tmux workspace"); commands.append("t: terminal") }
         if [TaskStatus.paused, .completed, .failed].contains(task.status) { commands.append(task.status == .completed ? "r: continue" : "r: retry") }
         commands.append("d: remove")
         if task.status.canTransition(to: .cancelled) { commands.append("x: cancel") }
@@ -611,7 +625,8 @@ public final class TaskManagerTUI {
         n           New task; on Connections, add a GitHub repository
         M           Toggle CODEX / MOCK for new manual tasks
         s           Simulate a source message (Home or Activity)
-        m / p / t   Message / pause / terminal for a selected child
+        o           Open child in tmux: editor, shared Codex, shell
+        m / p / t   Message / pause / exclusive terminal for a selected child
         d / x / r   Remove / cancel / retry a selected child
         u / i       Reconsider an ignored source / start independent exploration
 

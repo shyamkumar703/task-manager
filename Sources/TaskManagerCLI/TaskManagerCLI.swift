@@ -135,7 +135,7 @@ struct TaskManagerCLI {
         case "terminal":
             try count(1)
             guard isatty(STDIN_FILENO) != 0 else { throw ManagerError.invalid("terminal requires an interactive TTY") }
-            let handoff = try await ManualTerminal.prepare(store: store, taskID: args[0])
+            let handoff = try await ManualTerminal.prepare(store: store, taskID: args[0], stateDirectory: statePath)
             do {
                 _ = try await ManualTerminal.runShell(session: handoff)
                 try await store.releaseTerminal(taskID: args[0])

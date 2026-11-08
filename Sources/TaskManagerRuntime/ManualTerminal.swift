@@ -6,7 +6,7 @@ import TaskManagerPersistence
 
 public enum ManualTerminal {
     /// Reserve the worktree, pause its worker, and wait until the coordinator has closed the runtime.
-    public static func prepare(store: Store, taskID: String, timeout: Duration = .seconds(15)) async throws -> AgentSessionRecord {
+    public static func prepare(store: Store, taskID: String, stateDirectory: String? = nil, timeout: Duration = .seconds(15)) async throws -> AgentSessionRecord {
         guard let existing = try await store.agentSession(taskID: taskID), let path = existing.workspace else {
             throw ManagerError.conflict("This task has no worktree yet. Mock tasks do not create worktrees.")
         }
@@ -20,7 +20,8 @@ public enum ManualTerminal {
             while ContinuousClock.now < deadline {
                 try Task.checkCancellation()
                 guard try await store.task(taskID).archivedAt == nil else { throw ManagerError.conflict("Task was archived") }
-                if let session = try await store.agentSession(taskID: taskID), !session.workerActive, session.turnID == nil {
+                let sharedRuntimeOpen = stateDirectory.map { FileManager.default.fileExists(atPath: TaskWorkspace.file(taskID: taskID, stateDirectory: $0).path) } ?? false
+                if let session = try await store.agentSession(taskID: taskID), !session.workerActive, session.turnID == nil, !sharedRuntimeOpen {
                     return session
                 }
                 try await Task.sleep(for: .milliseconds(50))

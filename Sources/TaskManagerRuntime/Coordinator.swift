@@ -16,6 +16,9 @@ public actor Coordinator {
         var starting = true
         var delivering = false
         var stopping = false
+        var idle = false
+        var idleChecked = ContinuousClock.now
+        var managedTurn = true
         var completion: JSONValue?
         var result: AgentResult?
         init(kind: WorkerKind) { self.kind = kind }
@@ -23,14 +26,16 @@ public actor Coordinator {
 
     private let store: Store
     private let workspaces: Workspaces
+    private let stateDirectory: String
     private let factory: @Sendable () -> any AgentConnection
     private let concurrency: Int
     private let mockInterval: Duration
     private let sourceTriage: SourceTriage
     private var active: [String: Run] = [:]
 
-    public init(store: Store, stateDirectory: String, concurrency: Int = 2, mockInterval: Duration = .seconds(1), triageEngine: (any TriageEngine)? = nil, factory: @escaping @Sendable () -> any AgentConnection = { CodexConnection() }) {
+    public init(store: Store, stateDirectory: String, concurrency: Int = 2, mockInterval: Duration = .seconds(1), triageEngine: (any TriageEngine)? = nil, factory: @escaping @Sendable () -> any AgentConnection = { CodexConnection(shared: true) }) {
         self.store = store
+        self.stateDirectory = stateDirectory
         self.workspaces = Workspaces(stateDirectory: stateDirectory)
         self.concurrency = max(1, concurrency)
         self.mockInterval = mockInterval
@@ -43,18 +48,27 @@ public actor Coordinator {
         let statuses = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0.status) })
         for id in Array(active.keys) {
             guard let run = active[id], !run.stopping else { continue }
-            if statuses[id] == .paused || statuses[id] == .cancelled || (statuses[id] == .queued && !run.starting) {
+            let manual = try await store.agentSession(taskID: id)?.manualActive == true
+            if manual || tasks.first(where: { $0.id == id })?.archivedAt != nil || statuses[id] == .paused || statuses[id] == .cancelled || (statuses[id] == .queued && !run.starting && !run.idle) {
                 run.stopping = true
                 Task { await self.halt(id, generation: run.generation) }
+            } else if run.idle && ContinuousClock.now - run.idleChecked > .seconds(120) {
+                run.idleChecked = .now
+                // Keep an opened workspace available between chat turns; release unused
+                // servers so completed tasks do not accumulate processes on the laptop.
+                if await TaskWorkspace.hasTmuxSession(taskID: id) == false, matching(id, run.generation)?.idle == true {
+                    await release(id, run.generation)
+                }
             } else if run.kind == .codex, !run.starting, !run.delivering, run.turnID != nil {
                 run.delivering = true
                 Task { await self.deliver(id, generation: run.generation) }
             }
         }
-        for task in tasks where task.archivedAt == nil && task.status == .queued && active[task.id] == nil && active.count < concurrency {
+        for task in tasks where task.archivedAt == nil && task.status == .queued && (active[task.id] == nil || active[task.id]?.idle == true) && active.values.filter({ !$0.idle }).count < concurrency {
             guard let session = try await store.agentSession(taskID: task.id) else { continue }
             guard try await store.claimWorker(taskID: task.id) else { continue }
-            let run = Run(kind: session.kind)
+            let run = active[task.id] ?? Run(kind: session.kind)
+            run.idle = false; run.starting = true; run.managedTurn = true; run.result = nil; run.completion = nil
             active[task.id] = run
             run.job = Task { await self.launch(task.id, generation: run.generation) }
         }
@@ -95,9 +109,11 @@ public actor Coordinator {
                 try await store.setWorkspace(taskID: id, path: workspace)
             }
             guard matching(id, generation) != nil, try await store.task(id).status == .running else { await release(id, generation); return }
-            let connection = factory()
-            run.connection = connection
-            try await connection.connect()
+            let connection = run.connection ?? factory()
+            if run.connection == nil {
+                run.connection = connection
+                try await connection.connect()
+            }
             guard matching(id, generation) != nil, try await store.task(id).status == .running else { await release(id, generation); return }
             var params: [String: JSONValue] = [
                 "cwd": .string(workspace), "sandbox": .string(session.purpose == .exploration ? "read-only" : "danger-full-access"), "approvalPolicy": .string("never"),
@@ -112,17 +128,21 @@ public actor Coordinator {
                 params["threadId"] = .string(thread)
                 params["excludeTurns"] = .bool(true)
             } else { method = "thread/start" }
-            let response = try await connection.request(method, params: .object(params))
+            let response: JSONValue
+            if let threadID = run.threadID { response = .object(["thread": .object(["id": .string(threadID)])]) }
+            else { response = try await connection.request(method, params: .object(params)) }
             guard matching(id, generation) != nil else { await connection.stop(); return }
             guard let threadID = response["thread"]?["id"]?.string else { throw TransportError.invalidMessage }
             run.threadID = threadID
             try await store.setThread(taskID: id, threadID: threadID)
             guard matching(id, generation) != nil, try await store.task(id).status == .running else { await halt(id, generation: generation); return }
-            run.listener = Task {
-                for await event in connection.events {
-                    await self.receive(id, generation: generation, event: event)
+            if run.listener == nil {
+                run.listener = Task {
+                    for await event in connection.events {
+                        await self.receive(id, generation: generation, event: event)
+                    }
+                    await self.disconnected(id, generation: generation)
                 }
-                await self.disconnected(id, generation: generation)
             }
             let task = try await store.task(id)
             let messages = try await store.messages(taskID: id, pendingOnly: true)
@@ -138,6 +158,9 @@ public actor Coordinator {
             try await store.setTurn(taskID: id, turnID: turnID)
             for message in messages { try await store.acknowledge(messageID: message.id) }
             try await store.record(taskID: id, kind: "agent.turn.started", detail: turnID)
+            if let address = connection.remoteAddress {
+                try TaskWorkspace(taskID: id, threadID: threadID, workspace: workspace, address: address).save(stateDirectory: stateDirectory)
+            }
             run.starting = false
             await completeIfReady(id, generation)
         } catch {
@@ -176,6 +199,13 @@ public actor Coordinator {
         if let thread = params["threadId"]?.string, thread != run.threadID { return }
         do {
             switch event.method {
+            case "turn/started":
+                guard !run.starting, let turn = params["turn"]?["id"]?.string, turn != run.turnID else { return }
+                run.turnID = turn; run.managedTurn = false; run.idle = false
+                run.result = nil; run.completion = nil
+                try await store.observeInteractiveTurn(taskID: id, turnID: turn)
+                try await store.record(taskID: id, kind: "agent.interactive.started", detail: turn)
+
             case "item/agentMessage/delta":
                 if let item = params["itemId"]?.string, let delta = params["delta"]?.string {
                     try await store.writeOutput(taskID: id, itemID: item, kind: "assistant", text: delta, append: true)
@@ -185,12 +215,17 @@ public actor Coordinator {
                 if item["type"]?.string == "agentMessage", let text = item["text"]?.string {
                     try await store.writeOutput(taskID: id, itemID: itemID, kind: "assistant", text: text)
                     if let result = try? JSONDecoder().decode(AgentResult.self, from: Data(text.utf8)) { run.result = result }
+                } else if item["type"]?.string == "userMessage", case .array(let content) = item["content"] {
+                    let text = content.compactMap { $0["text"]?.string }.joined(separator: "\n")
+                    if !text.isEmpty { try await store.writeOutput(taskID: id, itemID: itemID, kind: "user", text: text) }
                 } else if item["type"]?.string == "commandExecution" {
                     var text = item["command"]?.string ?? "Running command"
                     if let result = item["aggregatedOutput"]?.string { text += "\n" + String(result.suffix(4000)) }
                     try await store.writeOutput(taskID: id, itemID: itemID, kind: "tool", text: text)
                 }
             case "turn/completed":
+                guard !run.idle else { return }
+                if let turn = params["turn"]?["id"]?.string, let expected = run.turnID, turn != expected { return }
                 run.completion = params["turn"]
                 await completeIfReady(id, generation)
             case "client/requestDenied":
@@ -206,6 +241,28 @@ public actor Coordinator {
         do {
             try await store.setTurn(taskID: id, turnID: nil)
             guard try await store.task(id).status == .running else { await release(id, generation); return }
+            if !run.managedTurn {
+                if completion["status"]?.string == "interrupted" {
+                    try await store.transition(id, to: .paused)
+                    await release(id, generation)
+                    return
+                }
+                guard completion["status"]?.string == "completed" else {
+                    throw ManagerError.invalid(completion["error"]?["message"]?.string ?? "Interactive Codex turn failed")
+                }
+                if !(try await store.messages(taskID: id, pendingOnly: true)).isEmpty { try await store.transition(id, to: .queued) }
+                else if let result = run.result, result.status == "question", !result.text.isEmpty { _ = try await store.ask(taskID: id, prompt: result.text) }
+                else if try await store.agentSession(taskID: id)?.purpose == .exploration {
+                    if let result = run.result, result.status == "completed", let reply = result.reply, !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        try await store.completeExploration(taskID: id, findings: result.text, reply: reply)
+                    } else {
+                        // Collect a structured finding/reply on the same thread after free-form chat.
+                        try await store.transition(id, to: .queued)
+                    }
+                } else { try await store.transition(id, to: .completed) }
+                await parkOrRelease(id, generation)
+                return
+            }
             guard completion["status"]?.string == "completed", let result = run.result,
                   ["question", "completed"].contains(result.status), !result.text.isEmpty else {
                 throw ManagerError.invalid(completion["error"]?["message"]?.string ?? "Agent stopped without a valid task outcome. Retry to continue its saved thread.")
@@ -218,7 +275,7 @@ public actor Coordinator {
                 guard let reply = result.reply, !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ManagerError.invalid("Explorer completed without a suggested reply; retry to finish the user action") }
                 try await store.completeExploration(taskID: id, findings: result.text, reply: reply)
             } else { try await store.transition(id, to: .completed) }
-            await release(id, generation)
+            await parkOrRelease(id, generation)
         } catch { await fail(id, generation, error) }
     }
 
@@ -274,6 +331,13 @@ public actor Coordinator {
         await release(id, generation)
     }
 
+    private func parkOrRelease(_ id: String, _ generation: String) async {
+        guard let run = matching(id, generation) else { return }
+        guard run.connection?.remoteAddress != nil else { await release(id, generation); return }
+        run.turnID = nil; run.result = nil; run.idle = true; run.idleChecked = .now
+        try? await store.releaseWorker(taskID: id)
+    }
+
     private func release(_ id: String, _ generation: String) async {
         guard let run = matching(id, generation) else { return }
         run.stopping = true
@@ -281,6 +345,7 @@ public actor Coordinator {
         // Mock jobs can be cancelled safely; a live launch handles its own post-await generation checks.
         if run.kind == .mock { run.job?.cancel() }
         await run.connection?.stop()
+        TaskWorkspace.remove(taskID: id, stateDirectory: stateDirectory)
         try? await store.releaseWorker(taskID: id)
         if matching(id, generation) != nil { active.removeValue(forKey: id) }
     }

@@ -54,6 +54,7 @@ The home dashboard places **Needs you** above the work list, with the selected i
 | `o` in Needs you | Inspect the linked child |
 | `n` | New task; on Connections, add a GitHub repository |
 | `M` | Switch new manual tasks/simulated sources between CODEX and MOCK |
+| `o` on work | Open the task’s tmux workspace: Neovim, the same live Codex child, and a shell |
 | `m` / `p` / `t` on work | Message / pause or resume / worktree terminal |
 | `r` / `d` / `x` on work | Retry or continue / remove / cancel, when available |
 | `s` | Simulate an incoming source message on Home or Activity |
@@ -71,6 +72,14 @@ To start a **real child**, press `n` with CODEX shown in the header. Try this go
 Answer with `a`; it resumes the same saved Codex thread. To test in-flight updates, start a task that takes some time (for example, ask it to run `sleep 20` before inspecting the spec), then send an instruction with `m`. Messages show QUEUED until Codex accepts `turn/steer`, then ACCEPTED. A message that loses the race with turn completion remains queued for the next turn.
 
 Real coding tasks get branches named `task-manager/TASK_ID` and worktrees under the state directory's `worktrees/`. The user's original checkout and uncommitted changes are preserved; work starts from committed HEAD. Use `show TASK_ID` to see the full workspace path and thread ID, and inspect that worktree with git as needed. Completed worktrees are retained.
+
+Press `o` on a running Codex task in Work to create or switch to its tmux session. The three windows are `editor` (Neovim), `codex`, and `shell`, all at the isolated task worktree root and branch. The Codex window is selected initially. Opening again reuses the session and restores closed windows. Install `tmux` and `nvim` and use a Codex CLI with `resume --remote` and Unix app-server support (tested with 0.167.0).
+
+The Codex window joins the coordinator's **same app-server and exact thread**, including an active turn. The manager continues saving output and forwarding relevant source messages; turns started in the Codex window also appear in the task transcript and status. Codex may show its own folder-trust prompt the first time you open a worktree. Existing task instructions and the exploration worker's read-only sandbox are preserved. Source updates still go through routing and conflict clarification; opening a workspace does not approve external actions.
+
+Inside tmux, use your tmux prefix followed by `L` to switch back to the previous session. Outside tmux, the manager attaches using the current terminal; prefix then `d` detaches back to the dashboard. Closing the terminal client does not pause the worker. The existing `t` shortcut below is an exclusive shell handoff.
+
+Shared servers remain available while a task's tmux session exists. Idle servers without a tmux session are released after two minutes; use `r` to continue a finished task's saved thread if necessary. Pausing, archiving, cancellation, or stopping the coordinator closes its shared runtime. After restarting, resume the task and press `o` again to reconnect the existing tmux session; its editor and shell remain intact. Task state and thread IDs remain durable in SQLite.
 
 Press `t` to use that worktree directly. An active worker pauses and releases ownership before your configured interactive shell opens in the existing terminal. Run `git status`, commit, or push manually there. `exit` returns to the TUI; press `p` if you want a paused child to continue. The terminal also shows the command to resume its saved Codex conversation interactively. Mock tasks have no worktree terminal.
 
@@ -293,3 +302,5 @@ Before asking which project a message concerns, the master now uses the channel 
 Metadata and raw message history are saved during existing discovery/poll batches, without additional Slack requests or permissions. Message text/revisions are unchanged by topic/name refreshes, so context updates do not duplicate tasks. Context is limited to the same workspace/conversation, excludes messages later than the incoming message, and truncates individual snippets. A snapshot is saved with each triage attempt for restart recovery and review; the incoming view shows its channel/topic and context counts. Child workers receive the same background context, labeled as source data rather than authority to change instructions or publish.
 
 Older unanswered project questions that had no context snapshot are reconsidered once after discovery refreshes metadata. Questions already asked with the expanded context stay waiting for the user. Existing baselined event history provides context during upgrade until the next successful poll fills the raw-message cache. Channel metadata comes from Slack’s [conversation listing](https://docs.slack.dev/reference/methods/conversations.list/).
+
+To run the optional real Codex/tmux integration checks, set `TASK_MANAGER_LIVE_CODEX_TEST=1`. The full tmux check also requires an isolated `CODEX_HOME` with your test credentials/config and `TASK_MANAGER_ISOLATED_CODEX_HOME=1`, because it accepts Codex's native trust prompt for a temporary fixture. Ordinary `./scripts/test.sh` runs offline fixtures and does not call a model.

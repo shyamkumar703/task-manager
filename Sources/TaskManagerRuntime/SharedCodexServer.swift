@@ -8,6 +8,7 @@ actor SharedCodexServer {
     private let directory: String
     private var process: Process?
     private var log: FileHandle?
+    private var lifeline: Pipe?
 
     init() {
         directory = "/tmp/task-agent-\(getuid())-\(UUID().uuidString)"
@@ -21,14 +22,26 @@ actor SharedCodexServer {
         let output = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
         log = output
         let child = Process()
-        child.executableURL = executable
-        child.arguments = ["app-server", "--listen", address]
-        child.standardInput = FileHandle.nullDevice
+        // EOF on this pipe also stops the server after an abrupt coordinator exit.
+        // Pass the executable and endpoint as argv; paths never become shell code.
+        let pipe = Pipe()
+        lifeline = pipe
+        child.executableURL = URL(fileURLWithPath: "/bin/sh")
+        child.arguments = ["-c", #"""
+            "$@" < /dev/null &
+            child=$!
+            trap 'kill -TERM "$child" 2>/dev/null; wait "$child" 2>/dev/null' EXIT
+            trap 'exit 0' INT TERM
+            IFS= read -r keepalive
+            exit 0
+            """#, "task-manager-codex", executable.path, "app-server", "--listen", address]
+        child.standardInput = pipe
         child.standardOutput = output
         child.standardError = output
         process = child
         do {
             try child.run()
+            try? pipe.fileHandleForReading.close()
             let deadline = ContinuousClock.now.advanced(by: .seconds(15))
             while ContinuousClock.now < deadline {
                 try Task.checkCancellation()
@@ -41,6 +54,7 @@ actor SharedCodexServer {
     }
 
     func stop() async {
+        try? lifeline?.fileHandleForWriting.close(); lifeline = nil
         if let child = process, child.isRunning {
             child.terminate()
             let deadline = ContinuousClock.now.advanced(by: .seconds(2))

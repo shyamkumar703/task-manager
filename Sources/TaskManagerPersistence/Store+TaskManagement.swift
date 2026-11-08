@@ -33,6 +33,25 @@ extension Store {
         }
     }
 
+    /// A turn started through the shared Codex terminal is still this worker's turn.
+    public func observeInteractiveTurn(taskID: String, turnID: String) throws {
+        try db.transaction {
+            let current = try task(taskID)
+            guard current.archivedAt == nil, ![.paused, .cancelled].contains(current.status),
+                  let session = try agentSession(taskID: taskID), !session.manualActive else {
+                throw ManagerError.conflict("This task is paused, archived, or owned by a manual terminal")
+            }
+            if current.status == .waitingForUser {
+                try db.execute("UPDATE questions SET answer = ? WHERE task_id = ? AND answer IS NULL", ["Continued directly in the shared Codex terminal", taskID])
+            }
+            if current.status != .running {
+                if current.status != .queued { try changeStatus(taskID, to: .queued) }
+                try changeStatus(taskID, to: .running)
+            }
+            try db.execute("UPDATE agent_sessions SET worker_active = 1, turn_id = ? WHERE task_id = ?", [turnID, taskID])
+        }
+    }
+
     public func releaseWorker(taskID: String) throws {
         try db.execute("UPDATE agent_sessions SET worker_active = 0, turn_id = NULL WHERE task_id = ?", [taskID])
     }

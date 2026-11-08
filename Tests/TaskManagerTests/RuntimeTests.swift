@@ -101,8 +101,10 @@ private actor FakeAgent: AgentConnection {
     private(set) var steered: JSONValue?
     let raceOnSteer: Bool
     let completeOnStart: Bool
+    nonisolated let remoteAddress: String?
 
-    init(raceOnSteer: Bool = false, completeOnStart: Bool = false) {
+    init(raceOnSteer: Bool = false, completeOnStart: Bool = false, shared: Bool = false) {
+        remoteAddress = shared ? "unix:///tmp/test-shared-socket" : nil
         let pair = AsyncStream<CodexClient.Event>.makeStream()
         events = pair.stream; continuation = pair.continuation
         self.raceOnSteer = raceOnSteer
@@ -141,7 +143,22 @@ private actor FakeAgent: AgentConnection {
             "threadId": .string("thread-1"), "turn": .object(["id": .string("turn-1"), "status": .string("completed")]),
         ])))
     }
-    func stop() { continuation.finish() }
+    func interactiveStart() {
+        continuation.yield(.init(method: "turn/started", params: .object([
+            "threadId": .string("thread-1"), "turn": .object(["id": .string("interactive-2")]),
+        ])))
+    }
+    func interactiveComplete() {
+        continuation.yield(.init(method: "item/completed", params: .object([
+            "threadId": .string("thread-1"), "item": .object([
+                "id": .string("interactive-answer"), "type": .string("agentMessage"), "text": .string("Answer from the same live child"),
+            ]),
+        ])))
+        continuation.yield(.init(method: "turn/completed", params: .object([
+            "threadId": .string("thread-1"), "turn": .object(["id": .string("interactive-2"), "status": .string("completed")]),
+        ])))
+    }
+    func stop() { methods.append("stop"); continuation.finish() }
 }
 
 @Test func liveDriverSteersTheActiveTurnAndAcknowledgesAfterAcceptance() async throws {
@@ -282,4 +299,160 @@ private final class FakeAgentQueue: @unchecked Sendable {
     #expect(try await store.agentSession(taskID: task.id)?.threadID == "thread-1")
     #expect(try await store.messages(taskID: task.id, pendingOnly: true).isEmpty)
     await coordinator.shutdown()
+}
+
+@Test(.enabled(if: ProcessInfo.processInfo.environment["TASK_MANAGER_LIVE_CODEX_TEST"] == "1"))
+func sharedCodexClientsJoinExactlyTheSameLiveThread() async throws {
+    let connection = CodexConnection(shared: true)
+    let peer = CodexClient()
+    do {
+        try await connection.connect()
+        let address = try #require(connection.remoteAddress)
+        let response = try await connection.request("thread/start", params: .object([
+            "cwd": .string(FileManager.default.currentDirectoryPath), "sandbox": .string("read-only"), "approvalPolicy": .string("never"),
+        ]))
+        let thread = try #require(response["thread"]?["id"]?.string)
+        let initial = try await connection.request("turn/start", params: .object([
+            "threadId": .string(thread), "input": .array([.object(["type": .string("text"), "text": .string("Reply OK. Do not use tools.")])]),
+        ]))
+        _ = try? await connection.request("turn/interrupt", params: .object(["threadId": .string(thread), "turnId": initial["turn"]?["id"] ?? .null]))
+        for await event in connection.events where event.method == "turn/completed" { break }
+        try await peer.connect(unixSocket: String(address.dropFirst("unix://".count)))
+        _ = try await peer.initialize()
+        let resumed = try await peer.request("thread/resume", params: .object(["threadId": .string(thread)]))
+        #expect(resumed["thread"]?["id"]?.string == thread)
+        let observer = Task {
+            for await event in connection.events where event.method == "turn/started" {
+                return event.params["threadId"]?.string
+            }
+            return nil as String?
+        }
+        let turn = try await peer.request("turn/start", params: .object([
+            "threadId": .string(thread), "input": .array([.object(["type": .string("text"), "text": .string("Reply with exactly SHARED_THREAD_OK. Do not use tools.")])]),
+        ]))
+        #expect(turn["turn"]?["id"]?.string != nil)
+        #expect(await observer.value == thread)
+        _ = try? await peer.request("turn/interrupt", params: .object(["threadId": .string(thread), "turnId": turn["turn"]?["id"] ?? .null]))
+        await peer.stop(); await connection.stop()
+    } catch { await peer.stop(); await connection.stop(); throw error }
+}
+
+@Test func sharedWorkerStaysObservedBetweenTurnsAndSteersInteractiveTurns() async throws {
+    let root = try runtimeDirectory()
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    let repository = root + "/repo"
+    try await gitRepository(at: repository)
+    let store = try Store(path: root + "/state.sqlite")
+    let fake = FakeAgent(shared: true)
+    let coordinator = Coordinator(store: store, stateDirectory: root, concurrency: 1, factory: { fake })
+    let task = try await store.createAgentTask(goal: "Investigate", repository: repository, kind: .codex)
+    try await coordinator.tick()
+    try await until("initial turn") { try await store.agentSession(taskID: task.id)?.turnID == "turn-1" }
+    await fake.complete()
+    try await until("idle shared worker") {
+        let session = try await store.agentSession(taskID: task.id)
+        return try await store.task(task.id).status == .completed && session?.workerActive == false
+    }
+    await fake.interactiveStart()
+    try await until("terminal turn observed") { try await store.agentSession(taskID: task.id)?.turnID == "interactive-2" }
+    #expect(try await store.task(task.id).status == .running)
+    let message = try await store.addMessage(taskID: task.id, body: "Relevant source follow-up")
+    try await coordinator.tick()
+    try await until("source forwarded to terminal turn") { try await store.messages(taskID: task.id).contains { $0.id == message && $0.delivered } }
+    #expect(await fake.steered?["expectedTurnId"]?.string == "interactive-2")
+    await fake.interactiveComplete()
+    try await until("terminal result observed") { try await store.task(task.id).status == .completed }
+    #expect(try await store.outputs(taskID: task.id).contains { $0.text == "Answer from the same live child" })
+    _ = try await store.addMessage(taskID: task.id, body: "More work")
+    try await coordinator.tick()
+    try await until("manager continues same connection") { try await store.agentSession(taskID: task.id)?.turnID == "turn-1" }
+    #expect(await fake.methods.filter { $0 == "thread/start" }.count == 1)
+    #expect(await fake.methods.filter { $0 == "thread/resume" }.isEmpty)
+    await fake.complete()
+    try await until("idle before exclusive handoff") {
+        let session = try await store.agentSession(taskID: task.id)
+        return try await store.task(task.id).status == .completed && session?.workerActive == false
+    }
+    let terminal = Task { try await ManualTerminal.prepare(store: store, taskID: task.id, stateDirectory: root) }
+    try await until("manual reservation") { try await store.agentSession(taskID: task.id)?.manualActive == true }
+    try await coordinator.tick()
+    _ = try await terminal.value
+    #expect(await fake.methods.contains("stop"))
+    #expect(!FileManager.default.fileExists(atPath: root + "/live-agents/" + task.id + ".json"))
+    await coordinator.shutdown()
+}
+
+@Test(.enabled(if: ProcessInfo.processInfo.environment["TASK_MANAGER_LIVE_CODEX_TEST"] == "1"))
+func liveTmuxWorkspaceUsesTheObservedChild() async throws {
+    let root = try runtimeDirectory()
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    let repository = root + "/repo with spaces"
+    try await gitRepository(at: repository)
+    let store = try Store(path: root + "/state.sqlite")
+    let coordinator = Coordinator(store: store, stateDirectory: root)
+    let task = try await store.createAgentTask(goal: "Return a completed result with text SHARED_INITIAL_OK. Do not use tools or change files.", repository: repository, kind: .codex)
+    let runner = GHProcessRunner(executable: URL(fileURLWithPath: try TaskWorkspace.executable("tmux")))
+    let loop = Task {
+        while !Task.isCancelled { try await coordinator.tick(); try await Task.sleep(for: .milliseconds(50)) }
+    }
+    let name = "task-" + task.id.lowercased()
+    do {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(90))
+        while ContinuousClock.now < deadline {
+            let status = try await store.task(task.id).status
+            if [.completed, .failed].contains(status) { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(try await store.task(task.id).status == .completed)
+        let record = try #require(await store.agentSession(taskID: task.id))
+        let data = try Data(contentsOf: URL(fileURLWithPath: root + "/live-agents/" + task.id + ".json"))
+        let workspace = try JSONDecoder().decode(TaskWorkspace.self, from: data)
+        #expect(workspace.threadID == record.threadID)
+        #expect(try await workspace.prepareTmux() == name)
+        try await Task.sleep(for: .seconds(3))
+        let windows = try await runner.run(arguments: ["list-windows", "-t", "=" + name, "-F", "#{window_name}|#{pane_current_path}"])
+        let windowText = String(decoding: windows.stdout, as: UTF8.self)
+        #expect(windowText.split(separator: "\n").count == 3)
+        for title in ["editor", "codex", "shell"] { #expect(windowText.contains(title + "|" + workspace.workingDirectory)) }
+        let capture = try await runner.run(arguments: ["capture-pane", "-p", "-t", "=" + name + ":codex"])
+        if String(decoding: capture.stdout, as: UTF8.self).contains("Trust this folder?") {
+            // The opt-in live test runs with an isolated CODEX_HOME, so accepting this
+            // fixture never edits the developer's real folder-trust configuration.
+            try #require(ProcessInfo.processInfo.environment["TASK_MANAGER_ISOLATED_CODEX_HOME"] == "1")
+            _ = try await runner.run(arguments: ["send-keys", "-t", "=" + name + ":codex", "Enter"])
+            try await Task.sleep(for: .seconds(3))
+        }
+        _ = try await runner.run(arguments: ["send-keys", "-t", "=" + name + ":codex", "-l", "Reply with SHARED_TERMINAL_OK. Do not use tools."])
+        _ = try await runner.run(arguments: ["send-keys", "-t", "=" + name + ":codex", "Enter"])
+        let startDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < startDeadline {
+            if try await store.journal().contains(where: { $0.kind == "agent.interactive.started" }) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let interactiveTurn = try #require(await store.journal().last { $0.kind == "agent.interactive.started" }?.detail)
+        let forwarded = try await store.addMessage(taskID: task.id, body: "Relevant source update: include FORWARDED_SOURCE_OK in your answer as well.")
+        let replyDeadline = ContinuousClock.now.advanced(by: .seconds(20))
+        while ContinuousClock.now < replyDeadline {
+            if try await store.outputs(taskID: task.id).contains(where: { $0.text.contains("SHARED_TERMINAL_OK") && $0.kind == "assistant" }) { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(try await store.journal().contains { $0.kind == "agent.interactive.started" })
+        #expect(try await store.outputs(taskID: task.id).contains { $0.text.contains("SHARED_TERMINAL_OK") && $0.kind == "assistant" })
+        #expect(try await store.agentSession(taskID: task.id)?.threadID == workspace.threadID)
+        #expect(try await store.messages(taskID: task.id).contains { $0.id == forwarded && $0.delivered })
+        #expect(try await store.journal().contains { $0.kind == "agent.steered" && $0.detail.contains(interactiveTurn) })
+        let before = try await runner.run(arguments: ["list-windows", "-t", "=" + name, "-F", "#{window_name}|#{window_id}"])
+        #expect(try await workspace.prepareTmux() == name)
+        let after = try await runner.run(arguments: ["list-windows", "-t", "=" + name, "-F", "#{window_name}|#{window_id}"])
+        #expect(before.stdout == after.stdout)
+        _ = try await runner.run(arguments: ["kill-window", "-t", "=" + name + ":codex"])
+        #expect(try await workspace.prepareTmux() == name)
+        let restored = try await runner.run(arguments: ["list-windows", "-t", "=" + name, "-F", "#{window_name}"])
+        #expect(String(decoding: restored.stdout, as: UTF8.self).split(separator: "\n").map(String.init) == ["editor", "codex", "shell"])
+        _ = try await runner.run(arguments: ["kill-session", "-t", "=" + name])
+        loop.cancel(); _ = try? await loop.value; await coordinator.shutdown()
+    } catch {
+        _ = try? await runner.run(arguments: ["kill-session", "-t", "=" + name])
+        loop.cancel(); _ = try? await loop.value; await coordinator.shutdown(); throw error
+    }
 }

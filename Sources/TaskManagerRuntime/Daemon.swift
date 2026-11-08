@@ -5,7 +5,7 @@ import TaskManagerCore
 import TaskManagerPersistence
 
 public enum Daemon {
-    private static let compatibilityVersion = "task-manager-11"
+    private static let compatibilityVersion = "task-manager-12"
     public static func requestStop(stateDirectory: String) throws {
         try Data().write(to: URL(fileURLWithPath: stateDirectory).appendingPathComponent("stop-request"), options: .atomic)
     }
@@ -17,6 +17,8 @@ public enum Daemon {
         let store = try Store(path: URL(fileURLWithPath: stateDirectory).appendingPathComponent("state.sqlite").path)
         let stopFile = URL(fileURLWithPath: stateDirectory).appendingPathComponent("stop-request")
         try? FileManager.default.removeItem(at: stopFile)
+        let liveAgents = URL(fileURLWithPath: stateDirectory).appendingPathComponent("live-agents")
+        if FileManager.default.fileExists(atPath: liveAgents.path) { try FileManager.default.removeItem(at: liveAgents) }
         _ = try await store.recoverAgentSessions()
         try await store.recoverTriage()
         try await store.record(taskID: nil, kind: "coordinator.started", detail: "pid \(ProcessInfo.processInfo.processIdentifier)")

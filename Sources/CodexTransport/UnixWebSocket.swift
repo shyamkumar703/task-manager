@@ -40,7 +40,16 @@ final class UnixWebSocket: @unchecked Sendable {
             }
             let expected = Data(Insecure.SHA1.hash(data: Data((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").utf8))).base64EncodedString()
             let text = String(decoding: header, as: UTF8.self)
-            guard text.hasPrefix("HTTP/1.1 101 "), text.lowercased().contains("sec-websocket-accept: \(expected.lowercased())") else { throw TransportError.invalidMessage }
+            var fields: [String: String] = [:]
+            for line in text.components(separatedBy: "\r\n").dropFirst() {
+                let parts = line.split(separator: ":", maxSplits: 1)
+                if parts.count == 2 { fields[String(parts[0]).lowercased()] = parts[1].trimmingCharacters(in: .whitespaces) }
+            }
+            guard text.hasPrefix("HTTP/1.1 101 "), fields["sec-websocket-accept"] == expected,
+                  fields["upgrade"]?.lowercased() == "websocket",
+                  fields["connection"]?.lowercased().split(separator: ",").contains(where: { $0.trimmingCharacters(in: .whitespaces) == "upgrade" }) == true else {
+                throw TransportError.invalidMessage
+            }
             timeout.tv_sec = 0
             setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         } catch { Darwin.close(fd); throw error }
