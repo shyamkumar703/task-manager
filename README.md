@@ -62,7 +62,7 @@ The home dashboard places **Needs you** above the work list, with the selected i
 
 The selected item's available actions are shown above its details. Navigation keys never approve, dismiss, or send anything. Arrow keys and PageUp/PageDown remain optional alternatives; Vim motions do not require them. The old `v` key remains a Home alias, but replies and questions no longer live behind a separate actions screen.
 
-In an input form, Enter submits, Ctrl-N inserts a newline, Ctrl-U clears input, Ctrl-W deletes the previous word, and Esc cancels. The original question remains visible while composing. Resize is handled by ncurses; the minimum layout is 80 columns by 22 rows. Muted cyan identifies headings, amber identifies decisions/questions, green indicates active/healthy state, and red identifies errors; body text stays neutral. `NO_COLOR` or terminals without color use bold/reverse-video fallbacks. Transcript controls are stripped before rendering.
+In an input form, Enter submits, Ctrl-N inserts a newline, Ctrl-U clears input, Ctrl-W deletes the previous word, and Esc cancels. The original question remains visible while composing. Resize is handled by ncurses; the minimum layout is 80 columns by 22 rows. Green identifies headings and active/healthy state, amber identifies decisions/questions, and red identifies errors; body text stays neutral. `NO_COLOR` or terminals without color use bold/reverse-video fallbacks. Transcript controls are stripped before rendering.
 
 To start a **real child**, press `n` with CODEX shown in the header. Try this goal:
 

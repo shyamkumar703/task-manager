@@ -39,7 +39,7 @@ int tm_terminal_open(void) {
         start_color(); use_default_colors();
         if (COLORS < 8 || COLOR_PAIRS < 8) tm_colors = 0;
         else {
-            init_pair(1, COLOR_CYAN, -1);
+            init_pair(1, COLOR_GREEN, -1);
             init_pair(2, COLOR_WHITE, COLOR_BLUE);
             init_pair(3, COLOR_WHITE, -1);
             init_pair(4, COLOR_YELLOW, -1);
