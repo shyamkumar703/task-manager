@@ -11,6 +11,7 @@ public actor CodexClient {
     public nonisolated let events: AsyncStream<Event>
     private let eventContinuation: AsyncStream<Event>.Continuation
     private var process: LineProcess?
+    private var socket: UnixWebSocket?
     private var reader: Task<Void, Never>?
     private var nextID: Int64 = 0
     private var pending: [Int64: CheckedContinuation<JSONValue, any Error>] = [:]
@@ -40,6 +41,19 @@ public actor CodexClient {
         }
     }
 
+    public func connect(unixSocket path: String) throws {
+        guard !started else { throw TransportError.alreadyStarted }
+        let transport = try UnixWebSocket(path: path)
+        started = true
+        socket = transport
+        reader = Task { [weak self, lines = transport.lines] in
+            do {
+                for try await line in lines { try await self?.receive(line) }
+                await self?.finish(TransportError.disconnected)
+            } catch { await self?.finish(error) }
+        }
+    }
+
     public func initialize(timeout: Duration = .seconds(10)) async throws -> JSONValue {
         let response = try await request("initialize", params: .object([
             "clientInfo": .object(["name": .string("autonomous_task_manager"), "title": .string("Autonomous Task Manager"), "version": .string("0.1.0")]),
@@ -52,7 +66,7 @@ public actor CodexClient {
 
     public func request(_ method: String, params: JSONValue = .object([:]), timeout: Duration = .seconds(10)) async throws -> JSONValue {
         try Task.checkCancellation()
-        guard process != nil else { throw TransportError.disconnected }
+        guard process != nil || socket != nil else { throw TransportError.disconnected }
         nextID += 1
         let id = nextID
         return try await withTaskCancellationHandler {
@@ -85,13 +99,15 @@ public actor CodexClient {
     }
 
     private func send(_ value: JSONValue) throws {
-        guard let process else { throw TransportError.disconnected }
+        guard process != nil || socket != nil else { throw TransportError.disconnected }
         var data = try JSONEncoder().encode(value)
-        data.append(10)
+        if socket == nil { data.append(10) }
         guard data.count <= 4 * 1024 * 1024 else { throw TransportError.oversizedMessage }
-        process.write(data) { [weak self] error in
+        let failed: @Sendable (any Error) -> Void = { [weak self] error in
             Task { await self?.finish(error) }
         }
+        if let socket { socket.write(data, completion: failed) }
+        else { process?.write(data, onFailure: failed) }
     }
 
     private func receive(_ data: Data) throws {
@@ -142,6 +158,8 @@ public actor CodexClient {
     }
 
     private func finish(_ error: any Error) {
+        socket?.stop()
+        socket = nil
         process?.stop()
         process = nil
         for timeout in timeouts.values { timeout.cancel() }
@@ -154,6 +172,8 @@ public actor CodexClient {
 
     deinit {
         reader?.cancel()
+        socket?.stop()
+        socket = nil
         process?.stop()
         for timeout in timeouts.values { timeout.cancel() }
         for request in pending.values { request.resume(throwing: TransportError.disconnected) }
