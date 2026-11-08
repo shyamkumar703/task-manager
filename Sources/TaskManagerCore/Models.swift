@@ -108,6 +108,9 @@ public struct AgentSessionRecord: Codable, Sendable {
     public let kind: WorkerKind
     public let threadID: String?
     public let turnID: String?
+    public let purpose: WorkerPurpose
+    public let baseRef: String?
+    public let baseSHA: String?
     public let workerActive: Bool
     public let manualActive: Bool
 }
@@ -118,4 +121,16 @@ public struct AgentOutput: Codable, Sendable, Identifiable {
     public let itemID: String
     public let kind: String
     public let text: String
+}
+
+public enum WorkerPurpose: String, Codable, Sendable { case implementation, exploration }
+
+public struct UserAction: Codable, Sendable, Identifiable {
+    public let id: String
+    public let taskID: String
+    public let sourceEventID: Int64
+    public let target: String
+    public let body: String
+    public let context: String
+    public let status: String
 }

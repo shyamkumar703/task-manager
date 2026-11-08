@@ -79,7 +79,7 @@ public struct CodexMasterTriage: TriageEngine {
     private static let schema: JSONValue = .object([
         "type": .string("object"), "additionalProperties": .bool(false),
         "properties": .object([
-            "action": .object(["type": .string("string"), "enum": .array(["route", "create", "ignore", "clarify", "conflict"].map(JSONValue.string))]),
+            "action": .object(["type": .string("string"), "enum": .array(["route", "create", "investigate", "ignore", "clarify", "conflict"].map(JSONValue.string))]),
             "taskID": .object(["type": .array([.string("string"), .string("null")])]),
             "repository": .object(["type": .array([.string("string"), .string("null")])]),
             "goal": .object(["type": .array([.string("string"), .string("null")])]),
@@ -100,7 +100,7 @@ public struct CodexMasterTriage: TriageEngine {
     clarification clearly identifies it. If no project is clear, clarify; never guess from UI selection,
     a sole available project, or the fact a conversation was discovered. A user can answer with an
     absolute checkout path. For scoped events, keep their repository. The repository output field is
-    only for create; it must be null for every other action.
+    only for create/investigate; it must be null for every other action.
     Return exactly one structured decision with a brief specific reason:
     - route: the event updates or affects an existing candidate task. Use its exact ID; goal/question null.
       Prefer continuing relevant existing work over creating duplicate tasks. Completed tasks can be continued.
@@ -117,6 +117,17 @@ public struct CodexMasterTriage: TriageEngine {
       and the message would redirect it, clarify instead. Separately labeled user clarification is
       authoritative for the specific conflict it resolves: route an accepted change, ignore a rejected
       change, and do not ask the same resolved question again.
+    - investigate: information-seeking questions, requests to explain current behavior, research or
+      exploration that should produce an answer rather than implementation changes. Spawn a fresh
+      exploratory task even when a related implementation task is completed. A feature worktree is
+      not evidence of current default-branch behavior. Supply a clear investigation goal. taskID may
+      identify a related candidate only as project context; do not resume or modify that task.
+      Otherwise choose a known repository (or keep the scoped event repository); question null.
+      The explorer inspects a read-only default-branch snapshot and prepares a suggested response
+      as a user action. Nothing is sent automatically. A follow-up to a currently running exploration
+      may route to that explorer; a new question or completed exploration needs a fresh snapshot.
+      Example: "What commands are available right now?" => investigate, not route to the task that
+      implemented one command. "Add another command" is implementation work, not investigation.
     - create: clearly actionable, distinct work within the event's repository, with a concrete goal.
       taskID/question null. For workspace-wide Slack supply the selected known repository; clarify if unknown.
       For scoped events repository may be null or their existing path. Never invent a task ID or repository.

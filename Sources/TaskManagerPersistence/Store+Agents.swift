@@ -14,11 +14,11 @@ extension Store {
         return try db.transaction { try insertAgentTask(goal: goal, repository: path, kind: kind) }
     }
 
-    func insertAgentTask(goal: String, repository: String, kind: WorkerKind) throws -> ManagedTask {
+    func insertAgentTask(goal: String, repository: String, kind: WorkerKind, purpose: WorkerPurpose = .implementation) throws -> ManagedTask {
         let id = UUID().uuidString
         let now = timestamp()
         try db.execute("INSERT INTO tasks(id, goal, status, source_key, created_at, updated_at) VALUES (?, ?, 'queued', NULL, ?, ?)", [id, goal, now, now])
-        try db.execute("INSERT INTO agent_sessions(task_id, repository, kind) VALUES (?, ?, ?)", [id, repository, kind.rawValue])
+        try db.execute("INSERT INTO agent_sessions(task_id, repository, kind, purpose) VALUES (?, ?, ?, ?)", [id, repository, kind.rawValue, purpose.rawValue])
         try writeOutput(taskID: id, itemID: "goal", kind: "user", text: goal)
         try log(taskID: id, kind: "task.created", detail: "\(kind.rawValue): \(goal)")
         return try task(id)
@@ -26,8 +26,8 @@ extension Store {
 
     public func agentSession(taskID: String) throws -> AgentSessionRecord? {
         guard let row = try db.query("SELECT * FROM agent_sessions WHERE task_id = ?", [taskID]).first else { return nil }
-        var object: [String: Any] = ["taskID": taskID, "repository": row["repository"]!, "kind": row["kind"]!, "workerActive": row["worker_active"] == "1", "manualActive": row["manual_active"] == "1"]
-        for (column, key) in [("workspace", "workspace"), ("thread_id", "threadID"), ("turn_id", "turnID")] {
+        var object: [String: Any] = ["taskID": taskID, "repository": row["repository"]!, "kind": row["kind"]!, "purpose": row["purpose"]!, "workerActive": row["worker_active"] == "1", "manualActive": row["manual_active"] == "1"]
+        for (column, key) in [("base_ref", "baseRef"), ("base_sha", "baseSHA"), ("workspace", "workspace"), ("thread_id", "threadID"), ("turn_id", "turnID")] {
             if let value = row[column] { object[key] = value }
         }
         return try decode(AgentSessionRecord.self, object)

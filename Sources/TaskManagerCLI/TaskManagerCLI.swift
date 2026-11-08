@@ -51,7 +51,7 @@ struct TaskManagerCLI {
             }
             return
         }
-        let known = ["init", "add", "list", "show", "status", "resume", "message", "ask", "answer", "questions", "journal", "ingest", "route", "propose-comment", "proposals", "decide", "github-import", "github-poll", "github-watch", "github-discover", "github-sources", "github-enable", "github-disable", "github-prs", "tui", "serve", "coordinator-start", "coordinator-stop", "agent-add", "transcript", "archive", "restore", "terminal", "release-terminal", "source-inject", "source-events", "source-answer", "source-retry", "source-ignore", "source-unignore", "slack-connect", "slack-conversations", "slack-watch", "slack-sources", "slack-enable", "slack-disable", "slack-poll"]
+        let known = ["init", "add", "list", "show", "status", "resume", "message", "ask", "answer", "questions", "journal", "ingest", "route", "propose-comment", "proposals", "decide", "github-import", "github-poll", "github-watch", "github-discover", "github-sources", "github-enable", "github-disable", "github-prs", "tui", "serve", "coordinator-start", "coordinator-stop", "agent-add", "transcript", "archive", "restore", "terminal", "release-terminal", "source-inject", "source-events", "source-answer", "source-retry", "source-ignore", "source-unignore", "source-investigate", "actions", "action-done", "action-dismiss", "slack-connect", "slack-conversations", "slack-watch", "slack-sources", "slack-enable", "slack-disable", "slack-poll"]
         guard known.contains(command) else { throw ManagerError.invalid("Unknown command: \(command). Run task-manager help.") }
         try FileManager.default.createDirectory(atPath: statePath, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         statePath = URL(fileURLWithPath: statePath).standardizedFileURL.resolvingSymlinksInPath().path
@@ -60,6 +60,9 @@ struct TaskManagerCLI {
             guard args.count == expected else { throw ManagerError.invalid("Incorrect arguments for \(command). Run task-manager help.") }
         }
         switch command {
+        case "actions": try count(0); try output(await store.userActions())
+        case "action-done", "action-dismiss":
+            try count(1); try await store.resolveUserAction(args[0], dismiss: command == "action-dismiss")
         case "slack-conversations":
             try count(0); try output(await SlackDiscovery.discover(stateDirectory: statePath))
         case "slack-sources": try count(0); try output(await store.slackSources())
@@ -118,11 +121,12 @@ struct TaskManagerCLI {
             guard args.count == 3 || args.count == 4, let kind = WorkerKind(rawValue: args[0]) else { throw ManagerError.invalid("source-inject mock|codex REPO TEXT [ASSOCIATION_KEY]") }
             print(try await store.injectSource(body: args[2], repository: args[1], workerKind: kind, associationKey: args.count == 4 ? args[3] : nil))
         case "source-events": try count(0); try output(await store.sources())
-        case "source-answer", "source-retry", "source-ignore", "source-unignore":
+        case "source-answer", "source-retry", "source-ignore", "source-unignore", "source-investigate":
             try count(command == "source-answer" ? 2 : 1)
             guard let id = Int64(args[0]) else { throw ManagerError.invalid("Source event ID must be an integer") }
             if command == "source-answer" { try await store.answerSource(eventID: id, text: args[1]) }
             else if command == "source-retry" { try await store.retrySource(id) }
+            else if command == "source-investigate" { print(try await store.investigateSource(id) ?? "Project question queued; use source-answer") }
             else if command == "source-unignore" { try await store.unignoreSource(id) }
             else { try await store.ignoreSource(id) }
         case "archive": try count(1); try await store.archive(args[0])
@@ -242,6 +246,9 @@ struct TaskManagerCLI {
       source-inject mock|codex REPO TEXT [ASSOCIATION_KEY]
                                             Inject a mock source; real master chooses its destination
       source-events                         Show incoming events and master decisions
+      actions                               List suggested replies and user actions
+      action-done ID                        Mark a manual reply action done; never sends
+      action-dismiss ID                     Dismiss a reply action
       slack-connect                         Secure dialog to verify and save a Slack user token
       slack-conversations                   Discover connected Slack channels and DMs
       slack-watch WORKSPACE_ID CHANNEL_ID LOCAL_REPO [SECONDS]
@@ -252,6 +259,7 @@ struct TaskManagerCLI {
       slack-poll SOURCE_ID                  Poll a configured Slack conversation once
       source-answer EVENT_ID TEXT           Answer master clarification
       source-retry EVENT_ID                  Retry failed triage
+      source-investigate EVENT_ID           Start independent default-branch exploration
       source-unignore EVENT_ID              Reconsider an ignored event through master triage
       source-ignore EVENT_ID                Ignore a pending source event
       init                                  Initialize durable local state

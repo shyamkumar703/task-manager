@@ -33,3 +33,47 @@ public struct Workspaces: Sendable {
         return workspace
     }
 }
+
+extension Workspaces {
+    public struct ExplorationSnapshot: Sendable {
+        public let path: String
+        public let reference: String
+        public let sha: String
+    }
+    /// Inspect a detached default-branch snapshot. Never choose the current feature HEAD.
+    public func prepareExploration(taskID: String, repository: String) async throws -> ExplorationSnapshot {
+        let runner = GHProcessRunner(executable: URL(fileURLWithPath: "/usr/bin/git"))
+        func git(_ args: [String]) async throws -> String? {
+            let result = try await runner.run(arguments: ["-C", repository] + args)
+            return result.exitCode == 0 ? String(decoding: result.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) : nil
+        }
+        var references: [String] = []
+        if let remote = try await git(["symbolic-ref", "refs/remotes/origin/HEAD"]), remote.hasPrefix("refs/remotes/origin/") {
+            references += ["refs/heads/" + remote.dropFirst("refs/remotes/origin/".count), remote]
+        }
+        references += ["refs/heads/main", "refs/heads/master", "refs/remotes/origin/main", "refs/remotes/origin/master"]
+        var selected: (String, String)?
+        for reference in references {
+            if let sha = try await git(["rev-parse", "--verify", reference + "^{commit}"]) { selected = (reference, sha); break }
+        }
+        guard let (reference, sha) = selected else { throw ManagerError.invalid("No local default-branch reference is available. Fetch or identify the default branch before retrying this exploration.") }
+        let directory = URL(fileURLWithPath: stateDirectory).appendingPathComponent("worktrees")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let path = directory.appendingPathComponent(taskID).path
+        if FileManager.default.fileExists(atPath: path) {
+            let actual = try await runner.run(arguments: ["-C", path, "rev-parse", "HEAD"])
+            let common = try await runner.run(arguments: ["-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"])
+            let expected = try await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            let branch = try await runner.run(arguments: ["-C", path, "symbolic-ref", "-q", "HEAD"])
+            guard actual.exitCode == 0, common.exitCode == 0, branch.exitCode != 0,
+                  String(decoding: common.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == expected else {
+                throw ManagerError.conflict("Existing exploration workspace belongs to another repository or is not detached")
+            }
+            // Reconcile a crash after worktree creation: retain the pinned commit, not a moved main.
+            return ExplorationSnapshot(path: path, reference: reference, sha: String(decoding: actual.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        let result = try await runner.run(arguments: ["-C", repository, "worktree", "add", "--detach", path, sha])
+        guard result.exitCode == 0 else { throw ManagerError.invalid("Could not create the default-branch exploration snapshot") }
+        return ExplorationSnapshot(path: path, reference: reference, sha: sha)
+    }
+}

@@ -258,3 +258,22 @@ Diagnostics and optional controls:
 ```
 
 `slack-poll SOURCE_ID` performs one complete diagnostic poll. The older `slack-watch` command remains available for explicit conversation/project bindings but is not needed for automatic monitoring. Slack connection metadata (`slack-connections.json`) and source/checkpoint state (SQLite) must use the same state directory. Keychain entries must remain available when restoring application state.
+
+### Exploratory questions and replies ready for review
+
+Information-seeking source questions (for example, “what commands are available right now?”) use an independent **exploration** task. A related implementation task can identify the project, but its branch/worktree is not reused or resumed. Implementation follow-ups still go through ordinary routing and conflict review. If the project is unclear, the master asks first.
+
+An explorer receives a detached snapshot of the locally available default branch, with its reference and exact commit saved in SQLite. It resolves the remote default-branch name when available, preferring the corresponding local branch; otherwise it looks for local/cached `main` or `master`. It never falls back to the currently checked-out feature branch. The snapshot is pinned across retries. There is no automatic fetch: findings describe that recorded local snapshot, not necessarily the newest remote, deployed or released version. Explorers use the app-server’s read-only sandbox, with apps and web search disabled, and instructions to inspect without implementing or publishing. See the [official app-server documentation](https://learn.chatgpt.com/docs/app-server).
+
+When an explorer finishes, its findings and suggested reply become a durable **user action** in the same transaction as completion. The TUI header shows an action count and the child shows “reply ready.” Press **`v`** for user actions, **`c`** to copy the suggested reply, **`Enter`** to inspect the child, or **`e`** for the source. Review and paste the response into the source thread manually; **`d`** marks it done and **`x`** dismisses it. Neither operation sends anything. Evidence and the inspected branch/commit are visible above the suggested reply (PgUp/PgDn scroll). Actions survive TUI detachment and coordinator restarts.
+
+For a question that was previously routed to the wrong feature worker, select the source in **`e`** and press **`i`** to request an independent investigation. Existing feature messages and decisions remain in history; repeated requests reuse the already-created exploration. CLI equivalents:
+
+```sh
+.build/debug/task-manager --state-dir .state/dev source-investigate EVENT_ID
+.build/debug/task-manager --state-dir .state/dev actions
+.build/debug/task-manager --state-dir .state/dev action-done ACTION_ID
+.build/debug/task-manager --state-dir .state/dev action-dismiss ACTION_ID
+```
+
+Relaunch the TUI after this upgrade to use the new actions view. The coordinator can be updated separately with `coordinator-start`.

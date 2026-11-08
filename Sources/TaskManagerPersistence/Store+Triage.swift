@@ -98,7 +98,7 @@ extension Store {
             let instructions = try db.query("SELECT body FROM messages WHERE task_id = ? ORDER BY sequence DESC LIMIT 8", [task.id]).reversed().map {
                 "Task inbox (source data includes separately labeled user clarification): " + String($0["body"]!.prefix(4000))
             }
-            return TriageCandidate(id: task.id, goal: String(task.goal.prefix(4096)), status: task.status, repository: try agentSession(taskID: task.id)!.repository, recentContext: resolutions + instructions + recent)
+            return TriageCandidate(id: task.id, goal: String(task.goal.prefix(4096)), status: task.status, repository: try agentSession(taskID: task.id)!.repository, recentContext: resolutions + instructions + recent, purpose: try agentSession(taskID: task.id)!.purpose)
         }
     }
 
@@ -140,6 +140,28 @@ extension Store {
                 try db.execute("UPDATE event_context SET repository = ? WHERE event_id = ?", [destinationRepository, String(eventID)])
                 try holdSource(eventID, reason: "Instruction or approach conflict: " + decision.reason, question: decision.question!)
                 return true
+            case .investigate:
+                if let related = decision.taskID {
+                    let target = try task(related)
+                    guard target.archivedAt == nil, target.status != .cancelled,
+                          let session = try agentSession(taskID: related), event.repository.isEmpty || event.repository == session.repository else {
+                        throw ManagerError.conflict("Investigation context task is unavailable or in another scoped project")
+                    }
+                    destinationRepository = session.repository
+                    if let requested = decision.repository, requested != destinationRepository { throw ManagerError.conflict("Investigation selected contradictory projects") }
+                } else if event.repository.isEmpty {
+                    guard let requested = decision.repository, try knownRepositories().contains(requested) else {
+                        try holdSource(eventID, reason: "The question needs a project to inspect", question: "Which local project should this question inspect? Enter its absolute checkout path.")
+                        return true
+                    }
+                    destinationRepository = requested
+                } else if let requested = decision.repository, requested != event.repository {
+                    throw ManagerError.conflict("Investigation cannot change a scoped source's project")
+                }
+                let task = try insertAgentTask(goal: decision.goal!, repository: destinationRepository, kind: event.workerKind, purpose: .exploration)
+                targetID = task.id
+                messageID = try insertMessage(taskID: task.id, body: sourceMessage(integration: event.integration, url: event.url, body: event.body, clarification: event.clarification))
+                try log(taskID: task.id, kind: "exploration.created", detail: "Source \(eventID); related task \(decision.taskID ?? "none"); inspect default branch, not an implementation worktree")
             case .create:
                 let associated = try associationTargets(key: event.associationKey, repository: event.repository)
                 guard associated.isEmpty || (event.clarification != nil && associated.allSatisfy { $0.archivedAt != nil || $0.status == .cancelled }) else {
@@ -163,10 +185,10 @@ extension Store {
                 try holdSource(eventID, reason: decision.reason, question: decision.question!)
                 return true
             }
-            if let targetID, decision.action != .ignore {
+            if let targetID, decision.action != .ignore && decision.action != .investigate {
                 try db.execute("INSERT INTO source_links(repository, association_key, task_id) VALUES (?, ?, ?) ON CONFLICT(repository, association_key) DO UPDATE SET task_id = excluded.task_id", [destinationRepository, event.associationKey, targetID])
             }
-            let disposition = decision.action == .route ? "routed" : decision.action == .create ? "created" : "ignored"
+            let disposition = decision.action == .route ? "routed" : (decision.action == .create || decision.action == .investigate) ? "created" : "ignored"
             try db.execute("UPDATE event_context SET repository = ? WHERE event_id = ?", [destinationRepository, String(eventID)])
             try db.execute("UPDATE events SET disposition = ?, task_id = ? WHERE id = ?", [disposition, targetID, String(eventID)])
             try db.execute("UPDATE event_context SET reason = ?, question = NULL, message_id = ?, last_error = NULL WHERE event_id = ?", [decision.reason, messageID, String(eventID)])

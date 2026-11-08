@@ -35,6 +35,9 @@ public final class TaskManagerTUI {
     private var sources: [IncomingSource] = []
     private var selectedSourceID: Int64?
     private var showingSources = false
+    private var showingActions = false
+    private var actions: [UserAction] = []
+    private var selectedActionID: String?
     private var showingGitHub = false
     private var showingSlack = false
     private var slackSources: [SlackSource] = []
@@ -109,6 +112,10 @@ public final class TaskManagerTUI {
     }
 
     private func reload() async throws {
+        let previous = Set(actions.filter { $0.status == "open" }.map(\.id))
+        actions = try await store.userActions()
+        if actions.contains(where: { $0.status == "open" && !previous.contains($0.id) }) { notice = "Reply ready for review · press v for user actions" }
+        if !actions.contains(where: { $0.id == selectedActionID }) { selectedActionID = actions.first?.id }
         slackSources = try await store.slackSources()
         slackWorkspaces = try await store.slackWorkspaces()
         if !slackSources.contains(where: { $0.id == selectedSlackID }) { selectedSlackID = slackSources.first?.id }
@@ -194,6 +201,25 @@ public final class TaskManagerTUI {
         if key == tm_key_down() || key == 106 { select(1); return }
         if key == tm_key_page_up() { scroll += max(1, Int(tm_terminal_rows()) - 12); return }
         if key == tm_key_page_down() { scroll = max(0, scroll - max(1, Int(tm_terminal_rows()) - 12)); return }
+        if key == 118 { showingActions.toggle(); showingSources = false; showingSlack = false; showingGitHub = false; scroll = 0; return }
+        if showingActions {
+            guard let action = actions.first(where: { $0.id == selectedActionID }) else {
+                if key == 113 || key == 3 { running = false }
+                return
+            }
+            switch key {
+            case 113, 3: running = false
+            case 99: try await ReplyClipboard.copy(action.body); notice = "Suggested reply copied. Review and paste it into the source thread; nothing was sent."
+            case 100: try await store.resolveUserAction(action.id); notice = "Action marked done; nothing was sent"; try await reload()
+            case 120: try await store.resolveUserAction(action.id, dismiss: true); notice = "Action dismissed"; try await reload()
+            case 10, 13, 343:
+                guard tasks.contains(where: { $0.id == action.taskID }) else { notice = "The child is archived; restore it to inspect its transcript"; return }
+                selectedID = action.taskID; showingActions = false; scroll = 0; try await reload()
+            case 101: selectedSourceID = action.sourceEventID; showingActions = false; showingSources = true; scroll = 0
+            default: break
+            }
+            return
+        }
         if key == 108 {
             showingSlack.toggle(); showingGitHub = false; showingSources = false
             discoveryJob?.cancel(); pickingSlack = false; slackDiscoveryJob?.cancel(); scroll = 0
@@ -295,9 +321,10 @@ public final class TaskManagerTUI {
                 guard source.disposition == .waitingForUser else { notice = "No master question for this source"; return }
                 composer = .sourceAnswer(source.id, source.attempts); input = Data()
             case 114: try await store.retrySource(source.id); try await reload(); notice = "Master triage queued for retry"
+            case 105: _ = try await store.investigateSource(source.id); try await reload(); notice = "Independent exploration requested; its reply will appear in v actions"
             case 117: try await store.unignoreSource(source.id); try await reload(); notice = "Source unignored; queued for master triage"
             case 120: try await store.ignoreSource(source.id); try await reload(); notice = "Source event ignored"
-            default: notice = "Sources: Enter opens child · a answers master · r retries failure · u unignores · x ignores · e returns"
+            default: notice = "Sources: Enter opens child · a answers master · i investigates · r retries failure · u unignores · x ignores · e returns"
             }
             return
         }
@@ -390,6 +417,13 @@ public final class TaskManagerTUI {
     }
 
     private func select(_ delta: Int) {
+        if showingActions {
+            guard !actions.isEmpty else { return }
+            let index = actions.firstIndex(where: { $0.id == selectedActionID }) ?? 0
+            selectedActionID = actions[min(actions.count - 1, max(0, index + delta))].id
+            scroll = 0
+            return
+        }
         if showingSlack {
             if pickingSlack { if !slackIndices.isEmpty { slackIndex = min(slackIndices.count - 1, max(0, slackIndex + delta)) } }
             else if !slackSources.isEmpty {
@@ -433,7 +467,13 @@ public final class TaskManagerTUI {
         let live = CoordinatorLock.isRunning(stateDirectory: stateDirectory)
         let masterQuestions = sources.filter { $0.disposition == .waitingForUser }.count
         let incoming = sources.filter { [.pending, .triaging, .failed].contains($0.disposition) }.count
-        draw(0, 0, " TASK MANAGER   new: \(kind.rawValue.uppercased())   coordinator: \(live ? "running" : "offline")   asks: \(questions.count + masterQuestions)   inbox: \(incoming) ", width: columns, emphasis: 2)
+        draw(0, 0, " TASK MANAGER   new: \(kind.rawValue.uppercased())   coordinator: \(live ? "running" : "offline")   asks: \(questions.count + masterQuestions)   inbox: \(incoming)   actions: \(actions.filter { $0.status == "open" }.count) ", width: columns, emphasis: 2)
+        if showingActions {
+            drawActions(rows: rows, columns: columns)
+            drawFooter(rows: rows, columns: columns)
+            tm_terminal_refresh()
+            return
+        }
         if showingSlack {
             drawSlack(rows: rows, columns: columns)
             drawFooter(rows: rows, columns: columns)
@@ -489,11 +529,12 @@ public final class TaskManagerTUI {
             let y = 3 + offset * 2
             let focused = task.id == selectedID
             draw(y, 1, "\(focused ? ">" : " ") \(task.goal)", width: left - 1, emphasis: focused ? 2 : 0)
-            draw(y + 1, 3, task.status.rawValue, width: left - 3)
+            let status = actions.contains { $0.taskID == task.id && $0.status == "open" } ? "reply ready · user action" : task.status.rawValue
+            draw(y + 1, 3, status, width: left - 3)
         }
         if let task = tasks.first(where: { $0.id == selectedID }) {
             draw(2, right, task.goal, width: width, emphasis: 1)
-            draw(3, right, "\(task.status.rawValue) · \(session?.kind.rawValue ?? "unbound") · \(messages.filter { !$0.delivered }.count) pending messages", width: width)
+            draw(3, right, "\(task.status.rawValue) · \(session?.purpose.rawValue ?? "implementation") · \(session?.kind.rawValue ?? "unbound") · \(messages.filter { !$0.delivered }.count) pending messages", width: width)
             draw(4, right, "Workspace: \(session?.workspace ?? session?.repository ?? repository)", width: width)
             var lines: [String] = []
             if output.isEmpty { lines += ["Waiting for the coordinator…"] }
@@ -519,6 +560,20 @@ public final class TaskManagerTUI {
         }
         drawFooter(rows: rows, columns: columns)
         tm_terminal_refresh()
+    }
+
+    private func drawActions(rows: Int, columns: Int) {
+        draw(1, 1, "USER ACTIONS · \(actions.filter { $0.status == "open" }.count) replies ready", width: columns - 2, emphasis: 1)
+        guard let action = actions.first(where: { $0.id == selectedActionID }) else {
+            draw(3, 1, "No suggested replies yet. Completed explorations will appear here.", width: columns - 2)
+            return
+        }
+        let index = (actions.firstIndex { $0.id == action.id } ?? 0) + 1
+        draw(2, 1, "Reply \(index)/\(actions.count) · \(action.status) · review and respond manually", width: columns - 2)
+        draw(3, 1, "Source: " + action.target, width: columns - 2)
+        let lines = ["FINDINGS / SNAPSHOT"] + TerminalText.wrap(action.context, width: columns - 2) + ["", "SUGGESTED REPLY"] + TerminalText.wrap(action.body, width: columns - 2) + ["", "c copies the reply. Open the source thread, review and paste it, then send manually."]
+        let end = max(0, lines.count - scroll), start = max(0, end - (rows - 11))
+        for (offset, line) in lines[start..<end].enumerated() { draw(5 + offset, 1, line, width: columns - 2) }
     }
 
     private func drawSlack(rows: Int, columns: Int) {
@@ -594,7 +649,10 @@ public final class TaskManagerTUI {
             for (offset, line) in lines.suffix(2).enumerated() { draw(rows - 3 + offset, 1, line, width: columns - 2) }
         } else {
             draw(rows - 4, 1, notice, width: columns - 2)
-            if showingSlack {
+            if showingActions {
+                draw(rows - 3, 1, "c copy reply · d mark done · x dismiss · Enter child · e source · ↑↓ select", width: columns - 2)
+                draw(rows - 2, 1, "v tasks · PgUp/Dn evidence/reply · q detach · Nothing is sent automatically", width: columns - 2)
+            } else if showingSlack {
                 draw(rows - 3, 1, pickingSlack ? "↑↓ select · Enter add · / filter · c clear · r refresh · Esc back" : "p pause/resume conversation · i interval · ↑↓ select (discovery is automatic)", width: columns - 2)
                 draw(rows - 2, 1, "l tasks · g GitHub · e incoming · q detach (polling continues)", width: columns - 2)
             } else if showingGitHub && pickingGitHub {
@@ -604,11 +662,11 @@ public final class TaskManagerTUI {
                 draw(rows - 3, 1, "n discover/add · p enable/disable · i interval · ↑↓ select", width: columns - 2)
                 draw(rows - 2, 1, "l Slack · g tasks · e incoming · q detach (polling continues)", width: columns - 2)
             } else if showingSources {
-                draw(rows - 3, 1, "s inject source · a clarify · Enter open child · r retry · u unignore · x ignore", width: columns - 2)
-                draw(rows - 2, 1, "l Slack · g GitHub · e tasks · ↑↓ select · PgUp/Dn scroll · Tab new-worker runtime · q detach", width: columns - 2)
+                draw(rows - 3, 1, "s inject source · a clarify · Enter open child · i investigate · r retry · u unignore · x ignore", width: columns - 2)
+                draw(rows - 2, 1, "v actions · l Slack · g GitHub · e tasks · ↑↓ select · PgUp/Dn scroll · Tab new-worker runtime · q detach", width: columns - 2)
             } else {
                 draw(rows - 3, 1, "n new · m msg · a answer · p pause · t terminal · d remove · s source", width: columns - 2)
-                draw(rows - 2, 1, "l Slack · g GitHub · e incoming · r retry · x cancel · Tab runtime · ↑↓ select · PgUp/Dn · q quit", width: columns - 2)
+                draw(rows - 2, 1, "v actions · l Slack · g GitHub · e incoming · r retry · x cancel · Tab runtime · ↑↓ select · PgUp/Dn · q quit", width: columns - 2)
             }
         }
     }
