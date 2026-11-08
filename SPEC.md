@@ -22,7 +22,8 @@ child agent:
 - creates a new git worktree in the repo if we need to check out some code
 - creates a new branch if we're building a feature
 - loops until the investigation is finished or the issue is solved
-- does not push any code, once it's verified that you've finished the investigation or solved the problem, notify the parent agent of the completion
+- completes explicit user requests end-to-end: a request such as 'can you push the changes?' authorizes that normal push without another approval prompt; publishing is not implied by an implementation-only request
+- verifies the actual result and notifies the parent agent of completion; PR status is checked through live GitHub reads rather than inferred only from local code
 - if it needs user input for anything, notify the parent agent and wait for user info
 
 other stuff:

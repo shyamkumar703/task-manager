@@ -139,8 +139,21 @@ extension Workspaces {
         return try await detachedExploration(taskID: taskID, repository: repository, reference: "refs/pull/\(context.pullRequest)/head", sha: context.headSHA, provenance: base + "\nNo matching branch checkout exists; inspecting a detached snapshot of the locally available PR head commit. No fetch was performed.")
     }
 
+    public func prepareStatusInspection(taskID: String, context: GitHubRoutingContext) throws -> ExplorationSnapshot {
+        let path = URL(fileURLWithPath: stateDirectory).appendingPathComponent("status-context").appendingPathComponent(taskID)
+        try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let evidence = "Live GitHub evidence collected through authenticated gh at \(context.checkedAt ?? "unknown time").\n" + (context.liveEvidence ?? "No live evidence available.")
+        try Data(evidence.utf8).write(to: path.appendingPathComponent("github-evidence.txt"), options: .atomic)
+        return ExplorationSnapshot(path: path.path, reference: "github:\(context.repository):pr:\(context.pullRequest)", sha: context.headSHA, provenance: "Status investigation using live GitHub evidence, not a local code snapshot.\n" + evidence)
+    }
+
     public func validateExploration(session: AgentSessionRecord) async throws {
         guard let workspace = session.workspace, let sha = session.baseSHA else { throw InspectionContextQuestion("This exploration has no recorded inspection commit. Start a fresh source investigation.") }
+        if session.baseRef?.hasPrefix("github:") == true {
+            let expected = URL(fileURLWithPath: stateDirectory).appendingPathComponent("status-context").appendingPathComponent(session.taskID).path
+            guard GitHubContextResolver.canonical(workspace) == GitHubContextResolver.canonical(expected) else { throw ManagerError.conflict("Status workspace changed") }
+            return
+        }
         let actual = try await GitHubContextResolver.git(workspace, ["rev-parse", "HEAD"])
         let branch = try await GitHubContextResolver.git(workspace, ["symbolic-ref", "-q", "HEAD"])
         let expectedCommon = try await GitHubContextResolver.git(session.repository, ["rev-parse", "--path-format=absolute", "--git-common-dir"])

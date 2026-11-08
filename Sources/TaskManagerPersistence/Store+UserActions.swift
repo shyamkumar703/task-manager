@@ -44,7 +44,7 @@ extension Store {
             guard let session = try agentSession(taskID: taskID), session.purpose == .exploration,
                   try task(taskID).status == .running else { throw ManagerError.conflict("Exploration is not running") }
             guard let event = try db.query("SELECT id, url FROM events WHERE task_id = ? AND disposition = 'created' ORDER BY id LIMIT 1", [taskID]).first else { throw ManagerError.notFound("Investigation has no source message") }
-            let provenance = try outputs(taskID: taskID).first { $0.itemID == "inspection-context" }?.text ?? "Local inspection; no remote refresh was performed."
+            let provenance = try output(taskID: taskID, itemID: "inspection-context")?.text ?? "Local inspection; no remote refresh was performed."
             let context = "Inspected \(session.baseRef ?? "mock snapshot") @ \(session.baseSHA ?? "mock").\n\(provenance)\n\n" + findings
             try db.execute("INSERT INTO user_actions(id, task_id, source_event_id, target, body, context) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET body = excluded.body, context = excluded.context, status = 'open'", [UUID().uuidString, taskID, event["id"]!, event["url"]!, String(reply.prefix(65536)), String(context.prefix(65536))])
             try changeStatus(taskID, to: .completed)

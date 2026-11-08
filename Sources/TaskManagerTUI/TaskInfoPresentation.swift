@@ -39,6 +39,7 @@ enum TaskInfoPresentation {
             if let context = source.githubContext {
                 body += "\n\nPR context: \(context.repository) #\(context.pullRequest)\nHead branch: \(context.headBranch) @ \(context.headSHA)\nCheckout: \(context.checkout ?? "Not locally checked out")\nOwning task: \(context.owningTaskID ?? "Unassigned")"
             }
+            if let evidence = source.githubContext?.liveEvidence { body += "\n\nLive GitHub evidence at \(source.githubContext?.checkedAt ?? "unknown time"):\n" + evidence }
             if let context = source.slackContext {
                 body += "\n\nContext: \(context.workspaceName) / #\(context.channelName)\nTopic: \(context.topic ?? "—")\nPurpose: \(context.purpose ?? "—")"
                 for (label, messages) in [("Preceding channel messages", context.precedingMessages), ("Thread messages", context.threadMessages)] where !messages.isEmpty {

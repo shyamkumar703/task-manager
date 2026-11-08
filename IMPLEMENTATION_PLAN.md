@@ -9,8 +9,8 @@ Agreed decisions:
 - Codex is the initial agent runtime.
 - Durable state allows recovery after process failure, laptop restart, and sleep.
 - The system may discover and start relevant local work without a direct assignment.
-- Actions that change external systems require explicit user approval. Routine configured reads and Codex inference are allowed; publishing, messaging, and remote mutations are gated.
-- Children finish with local results and verification evidence. They never push code automatically.
+- Actions that change external systems require an explicit request or approval for that action. The current user request counts as approval: "can you push" means execute the ordinary requested push. Routine configured reads and Codex inference are allowed; do not add a duplicate approval step.
+- Children finish with verified results. They commit/push when explicitly requested and verify the remote result; an implementation-only request does not imply publication.
 - The first interface is a TUI. A blocked child must not block ingestion, triage, or other children.
 - GitHub PR feedback is the first complete workflow. The user will supply a test repository.
 

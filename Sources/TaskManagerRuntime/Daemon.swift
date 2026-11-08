@@ -5,7 +5,7 @@ import TaskManagerCore
 import TaskManagerPersistence
 
 public enum Daemon {
-    private static let compatibilityVersion = "task-manager-14"
+    private static let compatibilityVersion = "task-manager-15"
     public static func requestStop(stateDirectory: String) throws {
         try Data().write(to: URL(fileURLWithPath: stateDirectory).appendingPathComponent("stop-request"), options: .atomic)
     }

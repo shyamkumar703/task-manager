@@ -64,6 +64,11 @@ extension Store {
             """, [taskID, itemID, kind, String(text.prefix(65536))])
     }
 
+    public func output(taskID: String, itemID: String) throws -> AgentOutput? {
+        guard let row = try db.query("SELECT * FROM agent_output WHERE task_id = ? AND item_id = ?", [taskID, itemID]).first else { return nil }
+        return try decode(AgentOutput.self, ["id": Int64(row["sequence"]!)!, "taskID": taskID, "itemID": row["item_id"]!, "kind": row["kind"]!, "text": row["text"]!])
+    }
+
     public func outputs(taskID: String, limit: Int = 200) throws -> [AgentOutput] {
         guard (1...1000).contains(limit) else { throw ManagerError.invalid("Output limit must be 1...1000") }
         return try db.query("SELECT * FROM (SELECT * FROM agent_output WHERE task_id = ? ORDER BY sequence DESC LIMIT ?) ORDER BY sequence", [taskID, String(limit)]).map {

@@ -7,8 +7,10 @@ public struct GitHubRoutingContext: Codable, Sendable {
     public let checkout: String?
     public let checkoutSHA: String?
     public let owningTaskID: String?
+    public let liveEvidence: String?
+    public let checkedAt: String?
 
-    public init(repository: String, pullRequest: Int, headBranch: String, headSHA: String, headRepository: String?, checkout: String? = nil, checkoutSHA: String? = nil, owningTaskID: String? = nil) {
-        self.repository = repository; self.pullRequest = pullRequest; self.headBranch = headBranch; self.headSHA = headSHA; self.headRepository = headRepository; self.checkout = checkout; self.checkoutSHA = checkoutSHA; self.owningTaskID = owningTaskID
+    public init(repository: String, pullRequest: Int, headBranch: String, headSHA: String, headRepository: String?, checkout: String? = nil, checkoutSHA: String? = nil, owningTaskID: String? = nil, liveEvidence: String? = nil, checkedAt: String? = nil) {
+        self.repository = repository; self.pullRequest = pullRequest; self.headBranch = headBranch; self.headSHA = headSHA; self.headRepository = headRepository; self.checkout = checkout; self.checkoutSHA = checkoutSHA; self.owningTaskID = owningTaskID; self.liveEvidence = liveEvidence; self.checkedAt = checkedAt
     }
 }
