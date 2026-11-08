@@ -204,7 +204,9 @@ Each poll re-fetches the complete PR feedback snapshot and uses revision hashes 
 
 ### Automatic repository polling
 
-Open the TUI and press **`g`** for GitHub repositories. Press **`n`** and enter the GitHub `OWNER/REPO`, absolute local checkout path, your GitHub login, and the polling interval in seconds (10–86400; default 60). Repeat for each repository to observe. Configuration and health are saved in SQLite alongside tasks. Press **`p`** to enable/disable the selected repository, **`e`** for incoming events, or **`g`** to return to tasks. The repository view shows last success, next poll, and errors. Authenticate with `gh auth login` first.
+Open the TUI and press **`g`**, then **`n`** to discover repositories using your existing `gh` authentication. Setup detects your GitHub login, reads the current checkout’s `origin`, and places that repository first in the list. Use **↑↓** to select, **`/`** to filter by repository name (**`c`** clears), and **Enter** to enable polling. The current checkout needs no additional input; other repositories ask only for a local checkout path whose origin matches the selection. Polling defaults to 60 seconds. No new login is needed if `gh` is already authenticated; authentication errors point to `gh auth status`.
+
+Repeat to add other accessible repositories. Archived/disabled repositories are omitted from the discovered account list. Press **`Esc`** to leave the picker, **`r`** to refresh, **`p`** to enable/disable a configured repository, or **`i`** to change its interval (10–86400 seconds). Configuration and health persist in SQLite. The repository view shows last success, next poll, and errors; **`e`** opens incoming events and **`g`** returns to tasks.
 
 The persistent coordinator discovers your open PRs in each enabled repository and reads their conversation comments, inline comments, and reviews. Polling continues after **`q`** detaches the TUI. Stopping the coordinator stops polling; restarting resumes using saved intervals, baselines, and event revisions. Network fetches run separately from child workers and master triage, with at most two repository polls in flight. Failures in one repository do not stop the others. Failed repository polls preserve successful per-PR commits and retry with saved backoff.
 
@@ -213,10 +215,13 @@ The initial successful repository scan records existing feedback without startin
 Equivalent CLI configuration, using the same state directory as the TUI:
 
 ```sh
-.build/debug/task-manager --state-dir .state/dev github-watch OWNER/REPO /absolute/path/to/local/repository YOUR_LOGIN 60
+.build/debug/task-manager --state-dir .state/dev github-discover /absolute/path/to/local/repository
+.build/debug/task-manager --state-dir .state/dev github-watch /absolute/path/to/local/repository
 .build/debug/task-manager --state-dir .state/dev github-sources
 .build/debug/task-manager --state-dir .state/dev github-disable SOURCE_ID
 .build/debug/task-manager --state-dir .state/dev github-enable SOURCE_ID
 ```
 
 The coordinator must be running (`tui` starts it, or use `serve`). Each remote repository has one configuration per state directory. Polling is independent of the new-task MOCK/CODEX toggle; automatically created source tasks use Codex.
+
+`github-watch LOCAL_REPO [SECONDS]` detects the authenticated account and checkout origin. The older explicit `github-watch OWNER/REPO LOCAL_REPO AUTHOR SECONDS` form remains available for advanced configuration. Discovery never clones repositories or enables monitoring until you select one.

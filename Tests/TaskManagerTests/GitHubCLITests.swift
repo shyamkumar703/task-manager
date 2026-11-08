@@ -47,7 +47,7 @@ private actor FakeGHCommand: GHCommandExecuting {
 @Test func ghRejectsMutationsForeignHostsAndManualCredentialsBeforeLaunching() async throws {
     let runner = FakeGHCommand([])
     let transport = GitHubCLITransport(runner: runner)
-    for url in ["https://evil.example/repos/o/r/pulls", "http://api.github.com/repos/o/r/pulls", "https://api.github.com/graphql"] {
+    for url in ["https://evil.example/repos/o/r/pulls", "http://api.github.com/repos/o/r/pulls", "https://api.github.com/graphql", "https://api.github.com/user/keys"] {
         let request = URLRequest(url: try #require(URL(string: url)))
         await #expect(throws: ManagerError.self) { try await transport.get(request) }
     }

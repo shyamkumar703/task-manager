@@ -30,6 +30,12 @@ extension Store {
         }
     }
 
+    public func setGitHubSourceInterval(_ id: String, seconds: Int) throws {
+        guard (10...86400).contains(seconds) else { throw ManagerError.invalid("Interval must be 10...86400 seconds") }
+        try db.execute("UPDATE github_sources SET interval_seconds = ?, next_poll = 0 WHERE id = ?", [String(seconds), id])
+        guard db.changes == 1 else { throw ManagerError.notFound("Unknown GitHub source") }
+    }
+
     public func setGitHubSourceEnabled(_ id: String, enabled: Bool) throws {
         try db.execute("UPDATE github_sources SET enabled = ?, next_poll = 0 WHERE id = ?", [enabled ? "1" : "0", id])
         guard db.changes == 1 else { throw ManagerError.notFound("Unknown GitHub source") }

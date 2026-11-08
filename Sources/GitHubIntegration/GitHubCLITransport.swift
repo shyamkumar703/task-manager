@@ -12,7 +12,7 @@ public struct GitHubCLITransport: GitHubHTTPTransport {
               let url = request.url, let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               components.scheme == "https", components.host == "api.github.com",
               components.port == nil, components.user == nil, components.password == nil,
-              components.fragment == nil, components.path.hasPrefix("/repos/"),
+              components.fragment == nil, (components.path.hasPrefix("/repos/") || components.path == "/user" || components.path == "/user/repos"),
               !components.path.contains("{"), !components.path.contains("}"),
               request.value(forHTTPHeaderField: "Authorization") == nil else {
             throw ManagerError.invalid("GitHub CLI transport requires a GitHub.com repository GET; authentication is managed by gh")

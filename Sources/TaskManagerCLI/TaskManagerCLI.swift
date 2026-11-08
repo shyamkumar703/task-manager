@@ -50,7 +50,7 @@ struct TaskManagerCLI {
             }
             return
         }
-        let known = ["init", "add", "list", "show", "status", "resume", "message", "ask", "answer", "questions", "journal", "ingest", "route", "propose-comment", "proposals", "decide", "github-import", "github-poll", "github-watch", "github-sources", "github-enable", "github-disable", "github-prs", "tui", "serve", "coordinator-stop", "agent-add", "transcript", "archive", "restore", "terminal", "release-terminal", "source-inject", "source-events", "source-answer", "source-retry", "source-ignore"]
+        let known = ["init", "add", "list", "show", "status", "resume", "message", "ask", "answer", "questions", "journal", "ingest", "route", "propose-comment", "proposals", "decide", "github-import", "github-poll", "github-watch", "github-discover", "github-sources", "github-enable", "github-disable", "github-prs", "tui", "serve", "coordinator-stop", "agent-add", "transcript", "archive", "restore", "terminal", "release-terminal", "source-inject", "source-events", "source-answer", "source-retry", "source-ignore"]
         guard known.contains(command) else { throw ManagerError.invalid("Unknown command: \(command). Run task-manager help.") }
         try FileManager.default.createDirectory(atPath: statePath, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         statePath = URL(fileURLWithPath: statePath).standardizedFileURL.resolvingSymlinksInPath().path
@@ -136,10 +136,22 @@ struct TaskManagerCLI {
             let repository = try GitHubRepository(args[0])
             let client = try GitHubClient()
             try output(await client.openPullRequests(in: repository, author: args[1]))
+        case "github-discover":
+            try count(1)
+            try output(await GitHubDiscovery().discover(checkout: args[0]))
         case "github-watch":
-            try count(4)
-            guard let interval = Int(args[3]) else { throw ManagerError.invalid("Interval must be seconds") }
-            print(try await store.addGitHubSource(repository: args[0], localRepository: args[1], author: args[2], intervalSeconds: interval))
+            if args.count == 4 {
+                guard let interval = Int(args[3]) else { throw ManagerError.invalid("Interval must be seconds") }
+                print(try await store.addGitHubSource(repository: args[0], localRepository: args[1], author: args[2], intervalSeconds: interval))
+            } else {
+                guard (1...2).contains(args.count) else { throw ManagerError.invalid("Use github-watch LOCAL_REPO [SECONDS]") }
+                let interval = args.count == 2 ? Int(args[1]) : 60
+                guard let interval else { throw ManagerError.invalid("Interval must be seconds") }
+                let client = try GitHubClient()
+                let login = try await client.authenticatedLogin()
+                guard let remote = try await GitHubDiscovery(client: client).checkoutRepository(args[0]) else { throw ManagerError.invalid("Checkout origin is not a supported GitHub.com remote") }
+                print(try await store.addGitHubSource(repository: remote.slug, localRepository: args[0], author: login, intervalSeconds: interval))
+            }
         case "github-sources": try count(0); try output(await store.gitHubSources())
         case "github-enable", "github-disable":
             try count(1); try await store.setGitHubSourceEnabled(args[0], enabled: command == "github-enable")
@@ -209,8 +221,8 @@ struct TaskManagerCLI {
       questions                             List unanswered questions
       answer QUESTION_ID TEXT               Save answer and queue continuation
       ingest EVENTS_JSON                    Ingest normalized source events
-      github-watch OWNER/REPO LOCAL_REPO AUTHOR SECONDS
-                                        Configure automatic polling of author’s open PRs
+      github-watch LOCAL_REPO [SECONDS]     Detect gh identity and origin; enable automatic polling
+      github-discover LOCAL_REPO            Discover gh identity and available repositories
       github-sources                        List repository polling health
       github-enable ID                      Enable automatic repository polling
       github-disable ID                     Disable automatic repository polling

@@ -8,10 +8,12 @@ import TaskManagerRuntime
 @MainActor
 public final class TaskManagerTUI {
     private enum Composer {
-        case new, message(String), answer(String), source, sourceAnswer(Int64, Int), github(Int, [String])
+        case new, message(String), answer(String), source, sourceAnswer(Int64, Int), githubPath(String, String), githubInterval(String), githubFilter
         var title: String {
             switch self {
-            case .github(let step, _): ["GitHub repository: OWNER/REPO", "Absolute local checkout path", "Your GitHub login (observe your open PRs)", "Poll interval in seconds (10...86400)"][step]
+            case .githubPath(let slug, _): "Local checkout path for " + slug
+            case .githubFilter: "Filter repositories by name"
+            case .githubInterval: "Poll interval in seconds (10...86400)"
             case .new: "New task goal"
             case .message: "Follow-up to selected child"
             case .answer: "Answer pending question"
@@ -33,6 +35,15 @@ public final class TaskManagerTUI {
     private var showingGitHub = false
     private var githubSources: [GitHubSource] = []
     private var selectedGitHubID: String?
+    private var pickingGitHub = false
+    private var discovery: GitHubDiscoveryResult?
+    private var discoveryJob: Task<Void, Never>?
+    private var discoveredIndex = 0
+    private var discoveryFilter = ""
+    private var discoveryIndices: [Int] {
+        guard let discovery else { return [] }
+        return discovery.repositories.indices.filter { discoveryFilter.isEmpty || discovery.repositories[$0].slug.localizedCaseInsensitiveContains(discoveryFilter) }
+    }
     private var session: AgentSessionRecord?
     private var output: [AgentOutput] = []
     private var messages: [TaskMessage] = []
@@ -53,7 +64,7 @@ public final class TaskManagerTUI {
 
     public func run() async throws {
         guard tm_terminal_open() == 0 else { throw ManagerError.invalid("The TUI requires an interactive terminal (TTY)") }
-        defer { tm_terminal_close() }
+        defer { discoveryJob?.cancel(); tm_terminal_close() }
         let previous = signal(SIGTERM, SIG_IGN)
         let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         termination.setEventHandler { self.running = false }
@@ -103,22 +114,19 @@ public final class TaskManagerTUI {
             case 10, 13, 343:
                 let text = String(decoding: input, as: UTF8.self)
                 try requireText(text, name: "Input")
-                if case .github(let step, let values) = composer {
-                    let values = values + [text]
-                    if step < 3 {
-                        self.composer = .github(step + 1, values)
-                        input = Data((step == 0 ? repository : step == 2 ? "60" : "").utf8)
-                        return
-                    }
-                    guard let interval = Int(text) else { throw ManagerError.invalid("Interval must be seconds") }
-                    selectedGitHubID = try await store.addGitHubSource(repository: values[0], localRepository: values[1], author: values[2], intervalSeconds: interval)
-                    self.composer = nil; input = Data()
-                    notice = "Repository saved; coordinator will discover and poll your open PRs automatically"
-                    try await reload()
-                    return
-                }
                 switch composer {
-                case .github: break
+                case .githubFilter:
+                    discoveryFilter = text; discoveredIndex = 0
+                case .githubPath(let slug, let login):
+                    let discovered = try await GitHubDiscovery().checkoutRepository(text)
+                    guard discovered?.slug.lowercased() == slug.lowercased() else { throw ManagerError.invalid("This checkout's origin does not match " + slug) }
+                    selectedGitHubID = try await store.addGitHubSource(repository: slug, localRepository: text, author: login)
+                    pickingGitHub = false
+                    notice = "Repository enabled; polling every 60 seconds using your gh identity"
+                case .githubInterval(let id):
+                    guard let seconds = Int(text) else { throw ManagerError.invalid("Interval must be seconds") }
+                    try await store.setGitHubSourceInterval(id, seconds: seconds)
+                    notice = "Polling interval saved"
                 case .new:
                     let task = try await store.createAgentTask(goal: text, repository: repository, kind: kind)
                     selectedID = task.id
@@ -158,11 +166,42 @@ public final class TaskManagerTUI {
         if key == tm_key_down() || key == 106 { select(1); return }
         if key == tm_key_page_up() { scroll += max(1, Int(tm_terminal_rows()) - 12); return }
         if key == tm_key_page_down() { scroll = max(0, scroll - max(1, Int(tm_terminal_rows()) - 12)); return }
-        if key == 103 { showingGitHub.toggle(); showingSources = false; scroll = 0; return }
+        if key == 103 { showingGitHub.toggle(); showingSources = false; pickingGitHub = false; discoveryJob?.cancel(); scroll = 0; return }
         if showingGitHub {
+            if pickingGitHub {
+                switch key {
+                case 113, 3: running = false
+                case 27: pickingGitHub = false; discoveryJob?.cancel()
+                case 114: beginGitHubDiscovery()
+                case 47: composer = .githubFilter; input = Data()
+                case 99: discoveryFilter = ""; discoveredIndex = 0
+                case 10, 13, 343:
+                    guard let discovery, discoveryIndices.indices.contains(discoveredIndex) else { return }
+                    let selected = discovery.repositories[discoveryIndices[discoveredIndex]]
+                    if let existing = githubSources.first(where: { $0.repository.caseInsensitiveCompare(selected.slug) == .orderedSame }) {
+                        selectedGitHubID = existing.id; pickingGitHub = false
+                        notice = "Already configured; p toggles polling and i changes the interval"
+                        return
+                    }
+                    if discovery.current?.slug.lowercased() == selected.slug.lowercased() {
+                        selectedGitHubID = try await store.addGitHubSource(repository: selected.slug, localRepository: repository, author: discovery.login)
+                        pickingGitHub = false
+                        notice = "Current checkout enabled; polling every 60 seconds using your gh identity"
+                        try await reload()
+                    } else {
+                        composer = .githubPath(selected.slug, discovery.login); input = Data()
+                    }
+                default: break
+                }
+                return
+            }
             switch key {
             case 113, 3: running = false
-            case 110: composer = .github(0, []); input = Data()
+            case 110: beginGitHubDiscovery()
+            case 105:
+                if let source = githubSources.first(where: { $0.id == selectedGitHubID }) {
+                    composer = .githubInterval(source.id); input = Data(String(source.intervalSeconds).utf8)
+                }
             case 112:
                 if let source = githubSources.first(where: { $0.id == selectedGitHubID }) {
                     try await store.setGitHubSourceEnabled(source.id, enabled: !source.enabled)
@@ -247,7 +286,29 @@ public final class TaskManagerTUI {
         }
     }
 
+    private func beginGitHubDiscovery() {
+        guard discoveryJob == nil else { return }
+        pickingGitHub = true; discovery = nil; discoveredIndex = 0; discoveryFilter = ""
+        notice = "Discovering repositories using your existing gh login…"
+        discoveryJob = Task {
+            defer { discoveryJob = nil }
+            do {
+                let result = try await GitHubDiscovery().discover(checkout: repository)
+                try Task.checkCancellation()
+                discovery = result
+                notice = "Select a repository; Enter enables the current checkout or asks for its local path"
+            } catch {
+                if !Task.isCancelled { notice = "Discovery failed: \(error). Check gh auth status, then press r to retry." }
+            }
+        }
+    }
+
     private func select(_ delta: Int) {
+        if showingGitHub && pickingGitHub {
+            guard !discoveryIndices.isEmpty else { return }
+            discoveredIndex = min(discoveryIndices.count - 1, max(0, discoveredIndex + delta))
+            return
+        }
         if showingGitHub {
             guard !githubSources.isEmpty else { return }
             let index = githubSources.firstIndex(where: { $0.id == selectedGitHubID }) ?? 0
@@ -280,8 +341,25 @@ public final class TaskManagerTUI {
         let incoming = sources.filter { [.pending, .triaging, .failed].contains($0.disposition) }.count
         draw(0, 0, " TASK MANAGER   new: \(kind.rawValue.uppercased())   coordinator: \(live ? "running" : "offline")   asks: \(questions.count + masterQuestions)   inbox: \(incoming) ", width: columns, emphasis: 2)
         if showingGitHub {
+            if pickingGitHub {
+                draw(1, 1, "ADD GITHUB REPOSITORY · " + (discovery?.login ?? "detecting gh identity…"), width: columns - 2, emphasis: 1)
+                if let discovery {
+                    let capacity = max(1, rows - 8)
+                    let first = max(0, discoveredIndex - capacity + 1)
+                    for (offset, index) in discoveryIndices.dropFirst(first).prefix(capacity).enumerated() {
+                        let candidate = discovery.repositories[index]
+                        let current = candidate.slug.lowercased() == discovery.current?.slug.lowercased()
+                        let configured = githubSources.contains { $0.repository.caseInsensitiveCompare(candidate.slug) == .orderedSame }
+                        draw(3 + offset, 1, "\(first + offset == discoveredIndex ? ">" : " ") \(candidate.slug)\(current ? " · current checkout" : "")\(configured ? " · configured" : "")", width: columns - 2, emphasis: first + offset == discoveredIndex ? 2 : 0)
+                    }
+                    if discoveryIndices.isEmpty { draw(3, 1, "No matching repositories. Press c to clear the filter.", width: columns - 2) }
+                }
+                drawFooter(rows: rows, columns: columns)
+                tm_terminal_refresh()
+                return
+            }
             draw(1, 1, "GITHUB REPOSITORIES", width: columns - 2, emphasis: 1)
-            if githubSources.isEmpty { draw(3, 1, "Press n to configure a repository. gh authentication must already be set up.", width: columns - 2) }
+            if githubSources.isEmpty { draw(3, 1, "Press n to discover repositories using your existing gh login.", width: columns - 2) }
             let selected = githubSources.firstIndex(where: { $0.id == selectedGitHubID }) ?? 0
             let capacity = max(1, (rows - 8) / 5)
             for (index, source) in githubSources.dropFirst(max(0, selected - capacity + 1)).prefix(capacity).enumerated() {
@@ -386,8 +464,11 @@ public final class TaskManagerTUI {
             for (offset, line) in lines.suffix(2).enumerated() { draw(rows - 3 + offset, 1, line, width: columns - 2) }
         } else {
             draw(rows - 4, 1, notice, width: columns - 2)
-            if showingGitHub {
-                draw(rows - 3, 1, "n add repository · p enable/disable · ↑↓ select", width: columns - 2)
+            if showingGitHub && pickingGitHub {
+                draw(rows - 3, 1, "↑↓ select · Enter add (60s default) · / filter · c clear · r refresh · Esc back", width: columns - 2)
+                draw(rows - 2, 1, "Current checkout is inferred from origin; other repos need a local path · q detach", width: columns - 2)
+            } else if showingGitHub {
+                draw(rows - 3, 1, "n discover/add · p enable/disable · i interval · ↑↓ select", width: columns - 2)
                 draw(rows - 2, 1, "g tasks · e incoming · q detach (polling continues)", width: columns - 2)
             } else if showingSources {
                 draw(rows - 3, 1, "s inject source · a clarify · Enter open child · r retry · x ignore", width: columns - 2)

@@ -70,6 +70,20 @@ public struct GitHubClient: Sendable {
         self.maxPages = maxPages
     }
 
+    public func authenticatedLogin() async throws -> String {
+        struct User: Decodable { let login: String }
+        let result = try await response(path: "/user")
+        let login = try JSONDecoder().decode(User.self, from: result.data).login
+        try requireText(login, name: "Authenticated GitHub login")
+        return login
+    }
+
+    public func accessibleRepositories() async throws -> [GitHubRepository] {
+        struct Repository: Decodable { let full_name: String; let archived: Bool; let disabled: Bool? }
+        let repositories: [Repository] = try await pages(path: "/user/repos", query: [URLQueryItem(name: "sort", value: "pushed"), URLQueryItem(name: "direction", value: "desc")])
+        return try repositories.filter { !$0.archived && $0.disabled != true }.map { try GitHubRepository($0.full_name) }
+    }
+
     public func openPullRequests(in repository: GitHubRepository, author: String) async throws -> [GitHubPullRequest] {
         try requireText(author, name: "GitHub author")
         let pulls: [GitHubPullRequest] = try await pages(path: "/repos/\(repository.slug)/pulls", query: [URLQueryItem(name: "state", value: "open")])
@@ -103,21 +117,7 @@ public struct GitHubClient: Sendable {
         var values: [T] = []
         for page in 1...maxPages {
             try Task.checkCancellation()
-            var components = URLComponents()
-            components.scheme = "https"
-            components.host = "api.github.com"
-            components.path = path
-            components.queryItems = query + [URLQueryItem(name: "per_page", value: "100"), URLQueryItem(name: "page", value: String(page))]
-            guard let url = components.url else { throw ManagerError.invalid("Invalid GitHub API URL") }
-            var request = URLRequest(url: url)
-            request.httpMethod = "GET"
-            request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-            request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
-            request.setValue("autonomous-task-manager/0.1.0", forHTTPHeaderField: "User-Agent")
-            let response = try await transport.get(request)
-            guard response.status == 200 else {
-                throw GitHubError.http(status: response.status, retryAfter: response.headers["retry-after"] ?? response.headers["x-ratelimit-reset"])
-            }
+            let response = try await response(path: path, query: query + [URLQueryItem(name: "per_page", value: "100"), URLQueryItem(name: "page", value: String(page))])
             let batch = try JSONDecoder().decode([T].self, from: response.data)
             values.append(contentsOf: batch)
             // Follow GitHub's next-page signal, rather than trusting a page length heuristic.
@@ -125,6 +125,25 @@ public struct GitHubClient: Sendable {
             if !hasNext { return values }
         }
         throw GitHubError.pageLimit
+    }
+
+    private func response(path: String, query: [URLQueryItem] = []) async throws -> HTTPResponse {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "api.github.com"
+        components.path = path
+        components.queryItems = query.isEmpty ? nil : query
+        guard let url = components.url else { throw ManagerError.invalid("Invalid GitHub API URL") }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        request.setValue("autonomous-task-manager/0.1.0", forHTTPHeaderField: "User-Agent")
+        let response = try await transport.get(request)
+        guard response.status == 200 else {
+            throw GitHubError.http(status: response.status, retryAfter: response.headers["retry-after"] ?? response.headers["x-ratelimit-reset"])
+        }
+        return response
     }
 
     private struct Comment: Decodable {
