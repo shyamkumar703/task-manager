@@ -1,0 +1,66 @@
+import Darwin
+import Foundation
+import TaskManagerCore
+import TaskManagerPersistence
+
+public enum Daemon {
+    public static func requestStop(stateDirectory: String) throws {
+        try Data().write(to: URL(fileURLWithPath: stateDirectory).appendingPathComponent("stop-request"), options: .atomic)
+    }
+
+    public static func serve(stateDirectory: String) async throws {
+        let lock = try CoordinatorLock(stateDirectory: stateDirectory)
+        defer { withExtendedLifetime(lock) {} }
+        let store = try Store(path: URL(fileURLWithPath: stateDirectory).appendingPathComponent("state.sqlite").path)
+        let stopFile = URL(fileURLWithPath: stateDirectory).appendingPathComponent("stop-request")
+        try? FileManager.default.removeItem(at: stopFile)
+        _ = try await store.recoverAgentSessions()
+        try await store.record(taskID: nil, kind: "coordinator.started", detail: "pid \(ProcessInfo.processInfo.processIdentifier)")
+        let coordinator = Coordinator(store: store, stateDirectory: stateDirectory)
+        let oldTerm = signal(SIGTERM, SIG_IGN)
+        let oldInt = signal(SIGINT, SIG_IGN)
+        let sources = [SIGTERM, SIGINT].map { number in
+            let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
+            source.setEventHandler { try? requestStop(stateDirectory: stateDirectory) }
+            source.resume()
+            return source
+        }
+        defer {
+            sources.forEach { $0.cancel() }
+            signal(SIGTERM, oldTerm)
+            signal(SIGINT, oldInt)
+        }
+        do {
+            while !Task.isCancelled && !FileManager.default.fileExists(atPath: stopFile.path) {
+                try await coordinator.tick()
+                try await Task.sleep(for: .milliseconds(100))
+            }
+        } catch {
+            await coordinator.shutdown()
+            throw error
+        }
+        await coordinator.shutdown()
+        try? FileManager.default.removeItem(at: stopFile)
+        try await store.record(taskID: nil, kind: "coordinator.stopped", detail: "Active tasks paused; workspaces and threads preserved")
+    }
+
+    /// The returned Process should be retained by the UI while attached. It outlives UI detachment.
+    public static func start(executable: URL, stateDirectory: String) throws -> Process? {
+        guard !CoordinatorLock.isRunning(stateDirectory: stateDirectory) else { return nil }
+        let log = URL(fileURLWithPath: stateDirectory).appendingPathComponent("coordinator.log")
+        if !FileManager.default.fileExists(atPath: log.path) {
+            FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        }
+        let file = try FileHandle(forWritingTo: log)
+        defer { try? file.close() }
+        try file.seekToEnd()
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["--state-dir", stateDirectory, "serve"]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = file
+        process.standardError = file
+        try process.run()
+        return process
+    }
+}

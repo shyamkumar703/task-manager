@@ -97,3 +97,22 @@ public func requireText(_ text: String, name: String) throws {
     guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
           !text.contains("\0") else { throw ManagerError.invalid("\(name) must be nonempty and contain no NUL characters") }
 }
+
+public enum WorkerKind: String, Codable, Sendable { case mock, codex }
+
+public struct AgentSessionRecord: Codable, Sendable {
+    public let taskID: String
+    public let repository: String
+    public let workspace: String?
+    public let kind: WorkerKind
+    public let threadID: String?
+    public let turnID: String?
+}
+
+public struct AgentOutput: Codable, Sendable, Identifiable {
+    public let id: Int64
+    public let taskID: String
+    public let itemID: String
+    public let kind: String
+    public let text: String
+}

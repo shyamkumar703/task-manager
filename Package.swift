@@ -13,11 +13,14 @@ let package = Package(
     ],
     targets: [
         .systemLibrary(name: "CSQLite"),
+        .target(name: "CLocalSupport", linkerSettings: [.linkedLibrary("ncurses")]),
         .target(name: "TaskManagerCore"),
         .target(name: "TaskManagerPersistence", dependencies: ["TaskManagerCore", "CSQLite"]),
         .target(name: "CodexTransport", dependencies: ["TaskManagerCore"]),
         .target(name: "GitHubIntegration", dependencies: ["TaskManagerCore"]),
-        .executableTarget(name: "TaskManagerCLI", dependencies: ["TaskManagerCore", "TaskManagerPersistence", "CodexTransport", "GitHubIntegration"]),
-        .testTarget(name: "TaskManagerTests", dependencies: ["TaskManagerCore", "TaskManagerPersistence", "CodexTransport", "GitHubIntegration"]),
+        .target(name: "TaskManagerRuntime", dependencies: ["TaskManagerCore", "TaskManagerPersistence", "CodexTransport", "GitHubIntegration", "CLocalSupport"]),
+        .target(name: "TaskManagerTUI", dependencies: ["TaskManagerCore", "TaskManagerPersistence", "TaskManagerRuntime", "CLocalSupport"]),
+        .executableTarget(name: "TaskManagerCLI", dependencies: ["TaskManagerCore", "TaskManagerPersistence", "CodexTransport", "GitHubIntegration", "TaskManagerRuntime", "TaskManagerTUI"]),
+        .testTarget(name: "TaskManagerTests", dependencies: ["TaskManagerCore", "TaskManagerPersistence", "CodexTransport", "GitHubIntegration", "TaskManagerRuntime", "TaskManagerTUI"]),
     ]
 )

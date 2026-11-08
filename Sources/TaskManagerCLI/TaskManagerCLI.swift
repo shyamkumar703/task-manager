@@ -3,6 +3,8 @@ import TaskManagerCore
 import TaskManagerPersistence
 import CodexTransport
 import GitHubIntegration
+import TaskManagerRuntime
+import TaskManagerTUI
 
 @main
 struct TaskManagerCLI {
@@ -48,17 +50,38 @@ struct TaskManagerCLI {
             }
             return
         }
-        let known = ["init", "add", "list", "show", "status", "resume", "message", "ask", "answer", "questions", "journal", "ingest", "route", "propose-comment", "proposals", "decide", "github-import", "github-prs"]
+        let known = ["init", "add", "list", "show", "status", "resume", "message", "ask", "answer", "questions", "journal", "ingest", "route", "propose-comment", "proposals", "decide", "github-import", "github-prs", "tui", "serve", "coordinator-stop", "agent-add", "transcript"]
         guard known.contains(command) else { throw ManagerError.invalid("Unknown command: \(command). Run task-manager help.") }
         try FileManager.default.createDirectory(atPath: statePath, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        statePath = URL(fileURLWithPath: statePath).standardizedFileURL.resolvingSymlinksInPath().path
         let store = try Store(path: URL(fileURLWithPath: statePath).appendingPathComponent("state.sqlite").path)
         func count(_ expected: Int) throws {
             guard args.count == expected else { throw ManagerError.invalid("Incorrect arguments for \(command). Run task-manager help.") }
         }
         switch command {
+        case "serve":
+            try count(0)
+            try await Daemon.serve(stateDirectory: statePath)
+        case "coordinator-stop":
+            try count(0)
+            try Daemon.requestStop(stateDirectory: statePath)
+            print("Stop requested. Active tasks will be paused.")
+        case "tui":
+            guard args.count <= 1 else { throw ManagerError.invalid("tui [REPOSITORY_PATH]") }
+            let repository = URL(fileURLWithPath: args.first ?? FileManager.default.currentDirectoryPath).standardizedFileURL.path
+            let executable = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+            let ui = await TaskManagerTUI(store: store, stateDirectory: statePath, repository: repository, executable: executable)
+            try await ui.run()
+        case "agent-add":
+            try count(3)
+            guard let kind = WorkerKind(rawValue: args[0]) else { throw ManagerError.invalid("Worker kind must be mock or codex") }
+            try output(await store.createAgentTask(goal: args[2], repository: args[1], kind: kind))
+        case "transcript":
+            try count(1)
+            try output(await store.outputs(taskID: args[0]))
         case "init":
             try count(0)
-            print("State initialized at \(statePath). Autonomous execution is not enabled.")
+            print("State initialized at \(statePath). Launch tui to start the coordinator.")
         case "add":
             guard args.count == 1 || args.count == 2 else { throw ManagerError.invalid("add GOAL [SOURCE_KEY]") }
             try output(await store.createTask(goal: args[0], sourceKey: args.count == 2 ? args[1] : nil))
@@ -116,6 +139,11 @@ struct TaskManagerCLI {
     static let help = """
     task-manager [--state-dir PATH] COMMAND
 
+      tui [REPOSITORY_PATH]                 Open TUI; start/attach background coordinator
+      serve                                 Run coordinator in foreground
+      coordinator-stop                      Pause workers and stop coordinator
+      agent-add mock|codex REPO GOAL         Queue a child task (coordinator must be running)
+      transcript TASK_ID                    Show saved worker output
       init                                  Initialize durable local state
       codex-probe [EXECUTABLE]               Check app-server handshake; no agent turn
       add GOAL [SOURCE_KEY]                 Create a queued task
@@ -136,7 +164,8 @@ struct TaskManagerCLI {
       proposals                             Inspect exact action proposals
       decide PROPOSAL_ID approve|reject     Record a decision; never publishes
 
-    No workers or external writes run in this foundation release.
+    TUI tasks use mock workers by default; Tab selects real Codex workers.
+    q detaches the TUI while workers continue. No external writes are authorized.
     State defaults to ~/Library/Application Support/AutonomousTaskManager.
     Override with --state-dir or TASK_MANAGER_STATE_DIR.
     """

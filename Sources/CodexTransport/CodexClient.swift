@@ -5,6 +5,7 @@ public actor CodexClient {
     public struct Event: Sendable {
         public let method: String
         public let params: JSONValue
+        public init(method: String, params: JSONValue) { self.method = method; self.params = params }
     }
 
     public nonisolated let events: AsyncStream<Event>

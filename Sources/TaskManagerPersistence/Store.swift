@@ -2,7 +2,7 @@ import Foundation
 import TaskManagerCore
 
 public actor Store {
-    private let db: Database
+    let db: Database
 
     public init(path: String) throws {
         db = try Database(path: path)
@@ -209,7 +209,7 @@ public actor Store {
         }
     }
 
-    private func changeStatus(_ id: String, to status: TaskStatus) throws {
+    func changeStatus(_ id: String, to status: TaskStatus) throws {
         let current = try task(id)
         guard current.status.canTransition(to: status) else {
             throw ManagerError.conflict("Cannot transition \(current.status.rawValue) to \(status.rawValue)")
@@ -222,18 +222,21 @@ public actor Store {
         try log(taskID: id, kind: "task.status", detail: "\(current.status.rawValue) -> \(status.rawValue)")
     }
 
-    private func insertMessage(taskID: String, body: String) throws -> String {
+    func insertMessage(taskID: String, body: String) throws -> String {
         let id = UUID().uuidString
         try db.execute("INSERT INTO messages(id, task_id, body) VALUES (?, ?, ?)", [id, taskID, body])
+        if try agentSession(taskID: taskID) != nil {
+            try writeOutput(taskID: taskID, itemID: "message-\(id)", kind: "user", text: body)
+        }
         try log(taskID: taskID, kind: "message.received", detail: id)
         return id
     }
 
-    private func log(taskID: String?, kind: String, detail: String) throws {
+    func log(taskID: String?, kind: String, detail: String) throws {
         try db.execute("INSERT INTO journal(task_id, kind, detail, created_at) VALUES (?, ?, ?, ?)", [taskID, kind, detail, timestamp()])
     }
 
-    private func timestamp() -> String { ISO8601DateFormatter().string(from: Date()) }
+    func timestamp() -> String { ISO8601DateFormatter().string(from: Date()) }
 
     private func decodeTask(_ row: [String: String]) throws -> ManagedTask {
         var values: [String: Any] = ["id": row["id"]!, "goal": row["goal"]!, "status": row["status"]!, "createdAt": row["created_at"]!, "updatedAt": row["updated_at"]!]
@@ -241,7 +244,7 @@ public actor Store {
         return try decode(ManagedTask.self, values)
     }
 
-    private func decode<T: Decodable>(_ type: T.Type, _ object: [String: Any]) throws -> T {
+    func decode<T: Decodable>(_ type: T.Type, _ object: [String: Any]) throws -> T {
         try JSONDecoder().decode(type, from: JSONSerialization.data(withJSONObject: object))
     }
 }
