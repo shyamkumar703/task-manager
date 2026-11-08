@@ -228,3 +228,7 @@ The coordinator must be running (`tui` starts it, or use `serve`). Each remote r
 `github-watch LOCAL_REPO [SECONDS]` detects the authenticated account and checkout origin. The older explicit `github-watch OWNER/REPO LOCAL_REPO AUTHOR SECONDS` form remains available for advanced configuration. Discovery never clones repositories or enables monitoring until you select one.
 
 Ignored source events can also be reconsidered with `task-manager --state-dir PATH source-unignore EVENT_ID`. The original event is requeued in place; its prior decision remains in the journal. New initial-baseline events display an explicit baseline reason in the incoming view.
+
+### Slack authorization setup
+
+Run `task-manager --state-dir PATH slack-connect` to open a native macOS secure token dialog. Paste the Slack **User OAuth Token** (`xoxp-`); the command checks the authenticated workspace/user with Slack and saves the credential in macOS Keychain. Tokens are not accepted as command arguments or saved in SQLite, JSON, or logs. Only workspace/user metadata is written to `slack-connections.json` in the state directory. This command connects credentials only; Slack conversation discovery and message polling are not enabled yet.

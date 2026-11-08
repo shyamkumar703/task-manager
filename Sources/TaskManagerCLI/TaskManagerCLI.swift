@@ -50,7 +50,7 @@ struct TaskManagerCLI {
             }
             return
         }
-        let known = ["init", "add", "list", "show", "status", "resume", "message", "ask", "answer", "questions", "journal", "ingest", "route", "propose-comment", "proposals", "decide", "github-import", "github-poll", "github-watch", "github-discover", "github-sources", "github-enable", "github-disable", "github-prs", "tui", "serve", "coordinator-stop", "agent-add", "transcript", "archive", "restore", "terminal", "release-terminal", "source-inject", "source-events", "source-answer", "source-retry", "source-ignore", "source-unignore"]
+        let known = ["init", "add", "list", "show", "status", "resume", "message", "ask", "answer", "questions", "journal", "ingest", "route", "propose-comment", "proposals", "decide", "github-import", "github-poll", "github-watch", "github-discover", "github-sources", "github-enable", "github-disable", "github-prs", "tui", "serve", "coordinator-stop", "agent-add", "transcript", "archive", "restore", "terminal", "release-terminal", "source-inject", "source-events", "source-answer", "source-retry", "source-ignore", "source-unignore", "slack-connect"]
         guard known.contains(command) else { throw ManagerError.invalid("Unknown command: \(command). Run task-manager help.") }
         try FileManager.default.createDirectory(atPath: statePath, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         statePath = URL(fileURLWithPath: statePath).standardizedFileURL.resolvingSymlinksInPath().path
@@ -59,6 +59,11 @@ struct TaskManagerCLI {
             guard args.count == expected else { throw ManagerError.invalid("Incorrect arguments for \(command). Run task-manager help.") }
         }
         switch command {
+        case "slack-connect":
+            try count(0)
+            let token = try await SlackConnection.promptToken()
+            let info = try await SlackConnection.connect(token: token, stateDirectory: statePath)
+            print("Connected Slack workspace \(info.workspaceName) (\(info.workspaceID)), user \(info.userID). Token saved in macOS Keychain. Slack message polling is not enabled yet.")
         case "serve":
             try count(0)
             try await Daemon.serve(stateDirectory: statePath)
@@ -203,6 +208,7 @@ struct TaskManagerCLI {
       source-inject mock|codex REPO TEXT [ASSOCIATION_KEY]
                                             Inject a mock source; real master chooses its destination
       source-events                         Show incoming events and master decisions
+      slack-connect                         Secure dialog to verify and save a Slack user token
       source-answer EVENT_ID TEXT           Answer master clarification
       source-retry EVENT_ID                  Retry failed triage
       source-unignore EVENT_ID              Reconsider an ignored event through master triage
