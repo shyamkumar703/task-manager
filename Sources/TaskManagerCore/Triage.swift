@@ -26,7 +26,7 @@ public struct IncomingSource: Codable, Sendable, Identifiable {
     public let targetWorkerKind: WorkerKind?
 }
 
-public enum TriageAction: String, Codable, Sendable { case route, create, ignore, clarify }
+public enum TriageAction: String, Codable, Sendable { case route, create, ignore, clarify, conflict }
 
 public struct TriageDecision: Codable, Sendable {
     public let action: TriageAction
@@ -46,6 +46,10 @@ public struct TriageDecision: Codable, Sendable {
         case .route:
             guard let taskID, goal == nil, question == nil else { throw ManagerError.invalid("Route requires only a task ID") }
             try requireText(taskID, name: "Target task ID")
+        case .conflict:
+            guard let taskID, let question, goal == nil, question.count <= 4096 else { throw ManagerError.invalid("Conflict requires a task ID and question") }
+            try requireText(taskID, name: "Conflicting task ID")
+            try requireText(question, name: "Conflict question")
         case .create:
             guard let goal, taskID == nil, question == nil, goal.count <= 8192 else { throw ManagerError.invalid("Create requires only a bounded goal") }
             try requireText(goal, name: "New task goal")

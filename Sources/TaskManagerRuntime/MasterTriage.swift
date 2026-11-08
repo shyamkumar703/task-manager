@@ -79,7 +79,7 @@ public struct CodexMasterTriage: TriageEngine {
     private static let schema: JSONValue = .object([
         "type": .string("object"), "additionalProperties": .bool(false),
         "properties": .object([
-            "action": .object(["type": .string("string"), "enum": .array(["route", "create", "ignore", "clarify"].map(JSONValue.string))]),
+            "action": .object(["type": .string("string"), "enum": .array(["route", "create", "ignore", "clarify", "conflict"].map(JSONValue.string))]),
             "taskID": .object(["type": .array([.string("string"), .string("null")])]),
             "goal": .object(["type": .array([.string("string"), .string("null")])]),
             "reason": .object(["type": .string("string")]),
@@ -99,6 +99,16 @@ public struct CodexMasterTriage: TriageEngine {
       Relevant findings, status changes, decisions, and constraints should be routed even when the message
       is only an FYI and contains no direct request. They may change an ongoing child's next step.
       Routing to a paused or waiting task preserves that state; it only adds information to its inbox.
+    - conflict: the incoming message contradicts the task's current instructions or current approach.
+      This takes precedence over route/create, including messages from an established source thread.
+      Compare the goal, user instructions, and the approach stated in recent conversation. A change
+      of strategy or incompatible requirement needs a user decision, not silent steering.
+      Set taskID to the affected candidate, goal null, and ask a concise question identifying the
+      existing instruction/approach and the incoming alternative. Do not decide which should win.
+      Compatible additional facts or requirements can still route. If the current approach is unclear
+      and the message would redirect it, clarify instead. Separately labeled user clarification is
+      authoritative for the specific conflict it resolves: route an accepted change, ignore a rejected
+      change, and do not ask the same resolved question again.
     - create: clearly actionable, distinct work within the event's repository, with a concrete goal.
       taskID/question null. Never invent a task ID or choose a different repository.
     - ignore: social chatter or information that neither materially affects a candidate task nor requests

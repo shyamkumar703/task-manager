@@ -44,7 +44,10 @@ private func eventually(_ condition: () async throws -> Bool) async throws {
     #expect(routed.targetWorkerKind == .mock)
     let followup = SourceEvent(integration: "slack", sourceID: "message:2", revision: "1", associationKey: event.associationKey, body: "And newlines", url: event.url)
     try await reopened.ingest([followup], repository: root)
-    #expect(try await reopened.routeKnownEvents() == 1)
+    #expect(try await reopened.routeKnownEvents() == 0)
+    #expect(try await reopened.messages(taskID: task.id).count == 1)
+    let reviewed = try #require(await reopened.claimTriageEvent())
+    try await reopened.applyTriage(eventID: reviewed.id, decision: decision)
     #expect(try await reopened.routeKnownEvents() == 0)
     #expect(try await reopened.messages(taskID: task.id).count == 2)
     #expect(try await reopened.claimTriageEvent() == nil)
@@ -134,7 +137,10 @@ private func eventually(_ condition: () async throws -> Bool) async throws {
     let replacement = try #require(await store.source(next).taskID)
     #expect(replacement != archived)
     let followup = try await store.injectSource(body: "Use UTF-8", repository: root, associationKey: "thread:1")
-    #expect(try await store.routeKnownEvents() == 1)
+    #expect(try await store.routeKnownEvents() == 0)
+    #expect(try await store.source(followup).disposition == .pending)
+    _ = try await store.claimTriageEvent()
+    try await store.applyTriage(eventID: followup, decision: .init(action: .route, taskID: replacement, reason: "Compatible encoding requirement"))
     #expect(try await store.source(followup).taskID == replacement)
     #expect(try await store.task(archived).archivedAt != nil)
 }
@@ -278,4 +284,40 @@ private actor FakeMasterConnection: AgentConnection {
     let id = try await upgraded.injectSource(body: "New update", repository: root)
     #expect(try await upgraded.source(id).disposition == .pending)
     try await upgraded.releaseTerminal(taskID: task.id)
+}
+
+@Test func instructionAndApproachConflictsWaitForDurableUserResolution() async throws {
+    let root = try triageRoot()
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    for accept in [true, false] {
+        let path = root + (accept ? "/accept.sqlite" : "/reject.sqlite")
+        let store = try Store(path: path)
+        let task = try await store.createAgentTask(goal: "Use Swift; preserve the existing CLI", repository: root, kind: .mock)
+        try await store.transition(task.id, to: .paused)
+        let body = accept ? "Rewrite in Python" : "Replace the CLI with a web app"
+        let id = try await store.injectSource(body: body, repository: root)
+        _ = try await store.claimTriageEvent()
+        try await store.applyTriage(eventID: id, decision: .init(action: .conflict, taskID: task.id,
+            reason: "Incoming proposal conflicts with current instructions or approach",
+            question: "Keep the current approach or adopt: \(body)?"))
+        let reopened = try Store(path: path)
+        try await reopened.recoverTriage()
+        #expect(try await reopened.source(id).disposition == .waitingForUser)
+        #expect(try await reopened.source(id).taskID == task.id)
+        #expect(try await reopened.messages(taskID: task.id).isEmpty)
+        #expect(try await reopened.task(task.id).status == .paused)
+        #expect(try await reopened.claimTriageEvent() == nil)
+        let answer = accept ? "Adopt the proposed change" : "Keep the current approach; ignore this proposal"
+        try await reopened.answerSource(eventID: id, text: answer)
+        _ = try await reopened.claimTriageEvent()
+        let decision = accept
+            ? TriageDecision(action: .route, taskID: task.id, reason: "User accepted the change")
+            : TriageDecision(action: .ignore, reason: "User rejected the change")
+        try await reopened.applyTriage(eventID: id, decision: decision)
+        let messages = try await reopened.messages(taskID: task.id)
+        #expect(messages.count == (accept ? 1 : 0))
+        if accept { #expect(messages[0].body.contains(answer)) }
+        let candidates = try await reopened.triageCandidates(repository: root)
+        #expect(candidates[0].recentContext.contains { $0.contains(answer) })
+    }
 }
