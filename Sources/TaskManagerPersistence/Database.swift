@@ -89,7 +89,7 @@ final class Database {
     private func migrate() throws {
         try transaction {
             let version = try query("PRAGMA user_version").first?["user_version"] ?? "0"
-            guard ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"].contains(version) else {
+            guard ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"].contains(version) else {
                 throw ManagerError.storage("Database schema \(version) is newer than this application")
             }
             if version == "0" {
@@ -200,13 +200,24 @@ final class Database {
                 try execute("CREATE TABLE IF NOT EXISTS slack_workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, user_id TEXT NOT NULL, next_discovery REAL NOT NULL DEFAULT 0, last_success REAL, last_error TEXT, failures INTEGER NOT NULL DEFAULT 0)")
                 try execute("PRAGMA user_version = 8")
             }
-            if version != "9" {
+            if ["0", "1", "2", "3", "4", "5", "6", "7", "8"].contains(version) {
                 let columns = try query("PRAGMA table_info(agent_sessions)").compactMap { $0["name"] }
                 if !columns.contains("purpose") { try execute("ALTER TABLE agent_sessions ADD COLUMN purpose TEXT NOT NULL DEFAULT 'implementation'") }
                 if !columns.contains("base_ref") { try execute("ALTER TABLE agent_sessions ADD COLUMN base_ref TEXT") }
                 if !columns.contains("base_sha") { try execute("ALTER TABLE agent_sessions ADD COLUMN base_sha TEXT") }
                 try execute("CREATE TABLE IF NOT EXISTS user_actions (id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id), source_event_id INTEGER NOT NULL REFERENCES events(id), target TEXT NOT NULL, body TEXT NOT NULL, context TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','done','dismissed')))")
                 try execute("PRAGMA user_version = 9")
+            }
+            if version != "10" {
+                let sourceColumns = try query("PRAGMA table_info(slack_sources)").compactMap { $0["name"] }
+                if !sourceColumns.contains("channel_topic") { try execute("ALTER TABLE slack_sources ADD COLUMN channel_topic TEXT") }
+                if !sourceColumns.contains("channel_purpose") { try execute("ALTER TABLE slack_sources ADD COLUMN channel_purpose TEXT") }
+                if !(try query("PRAGMA table_info(event_context)").compactMap { $0["name"] }).contains("routing_context") {
+                    try execute("ALTER TABLE event_context ADD COLUMN routing_context TEXT")
+                }
+                try execute("CREATE TABLE IF NOT EXISTS slack_messages (source_key TEXT NOT NULL REFERENCES slack_sources(id), timestamp TEXT NOT NULL, thread_timestamp TEXT NOT NULL, author TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(source_key, timestamp))")
+                try execute("UPDATE slack_workspaces SET next_discovery = 0")
+                try execute("PRAGMA user_version = 10")
             }
         }
     }

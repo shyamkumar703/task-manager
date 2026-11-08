@@ -4,7 +4,11 @@ public struct SlackConversation: Codable, Sendable, Identifiable {
     public let id: String
     public let name: String
     public let isDM: Bool
-    public init(id: String, name: String, isDM: Bool) { self.id = id; self.name = name; self.isDM = isDM }
+    public let topic: String?
+    public let purpose: String?
+    public init(id: String, name: String, isDM: Bool, topic: String? = nil, purpose: String? = nil) {
+        self.id = id; self.name = name; self.isDM = isDM; self.topic = topic; self.purpose = purpose
+    }
 }
 
 public struct SlackSource: Codable, Sendable, Identifiable {

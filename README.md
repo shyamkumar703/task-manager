@@ -277,3 +277,11 @@ For a question that was previously routed to the wrong feature worker, select th
 ```
 
 Relaunch the TUI after this upgrade to use the new actions view. The coordinator can be updated separately with `coordinator-start`.
+
+### Slack context for project routing
+
+Before asking which project a message concerns, the master now uses the channel name, topic and purpose, up to eight preceding channel messages, up to twelve earlier messages in the same thread (including its root), and up to four earlier project decisions from that conversation. Previous user clarifications help interpret short follow-ups without repeatedly asking for the project name. These are contextual clues, not permanent channel bindings: an explicit project change takes precedence, and genuinely conflicting or insufficient evidence still produces a focused question.
+
+Metadata and raw message history are saved during existing discovery/poll batches, without additional Slack requests or permissions. Message text/revisions are unchanged by topic/name refreshes, so context updates do not duplicate tasks. Context is limited to the same workspace/conversation, excludes messages later than the incoming message, and truncates individual snippets. A snapshot is saved with each triage attempt for restart recovery and review; the incoming view shows its channel/topic and context counts. Child workers receive the same background context, labeled as source data rather than authority to change instructions or publish.
+
+Older unanswered project questions that had no context snapshot are reconsidered once after discovery refreshes metadata. Questions already asked with the expanded context stay waiting for the user. Existing baselined event history provides context during upgrade until the next successful poll fills the raw-message cache. Channel metadata comes from Slack’s [conversation listing](https://docs.slack.dev/reference/methods/conversations.list/).

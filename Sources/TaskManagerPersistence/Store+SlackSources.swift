@@ -45,6 +45,15 @@ extension Store {
             guard events.allSatisfy({ $0.integration == "slack" && $0.sourceID.hasPrefix("\(source.workspaceID):\(source.channelID):") && $0.associationKey.hasPrefix("\(id):thread:") }) else { throw ManagerError.conflict("Slack batch belongs to another conversation") }
             let cursor = try pollingCursor(sourceKey: id, repository: source.repository, workerKind: .codex)
             guard cursor?.generation == expectedGeneration else { throw ManagerError.conflict("Slack cursor changed; fetch again") }
+            for event in events {
+                if let message = event.slackMessage {
+                    guard event.sourceID == "\(source.workspaceID):\(source.channelID):\(message.timestamp)",
+                          event.associationKey == "\(id):thread:\(message.threadTimestamp)",
+                          let timestamp = Double(message.timestamp), timestamp.isFinite,
+                          let root = Double(message.threadTimestamp), root.isFinite else { throw ManagerError.invalid("Slack message context does not match its event") }
+                    try db.execute("INSERT INTO slack_messages(source_key, timestamp, thread_timestamp, author, body) VALUES (?, ?, ?, ?, ?) ON CONFLICT(source_key, timestamp) DO UPDATE SET thread_timestamp = excluded.thread_timestamp, author = excluded.author, body = excluded.body", [id, message.timestamp, message.threadTimestamp, message.author, message.text])
+                }
+            }
             let inserted = try ingestBatch(events, scope: source.repository, workerKind: .codex, baseline: cursor == nil)
             try db.execute("INSERT INTO polling_cursors(source_key, repository, worker_kind, generation, completed_at) VALUES (?, ?, 'codex', ?, ?) ON CONFLICT(source_key) DO UPDATE SET generation = excluded.generation, completed_at = excluded.completed_at", [id, source.repository, String((expectedGeneration ?? 0) + 1), ISO8601DateFormatter().string(from: now)])
             try db.execute("UPDATE slack_sources SET last_success = ?, next_poll = ?, last_error = NULL, failures = 0 WHERE id = ?", [String(now.timeIntervalSince1970), String(ceil(now.timeIntervalSince1970 + Double(source.intervalSeconds))), id])

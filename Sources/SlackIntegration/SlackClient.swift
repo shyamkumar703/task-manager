@@ -81,11 +81,12 @@ public struct SlackClient: Sendable {
         throw SlackError.pageLimit
     }
     public func conversations() async throws -> [SlackConversation] {
-        struct Channel: Decodable { let id: String; let name: String?; let user: String?; let is_im: Bool?; let is_mpim: Bool?; let is_archived: Bool?; let is_member: Bool? }
+        struct Description: Decodable { let value: String }
+        struct Channel: Decodable { let topic: Description?; let purpose: Description?; let id: String; let name: String?; let user: String?; let is_im: Bool?; let is_mpim: Bool?; let is_archived: Bool?; let is_member: Bool? }
         let channels: [Channel] = try await pages(method: "conversations.list", query: [URLQueryItem(name: "types", value: "public_channel,private_channel,im,mpim"), URLQueryItem(name: "exclude_archived", value: "true")])
         return channels.filter { $0.is_archived != true }.map {
             let dm = $0.is_im == true || $0.is_mpim == true
-            return SlackConversation(id: $0.id, name: $0.name ?? $0.user.map { "DM with " + $0 } ?? $0.id, isDM: dm)
+            return SlackConversation(id: $0.id, name: $0.name ?? $0.user.map { "DM with " + $0 } ?? $0.id, isDM: dm, topic: $0.topic?.value, purpose: $0.purpose?.value)
         }
     }
     private struct Message: Decodable {
@@ -117,7 +118,8 @@ public struct SlackClient: Sendable {
             return SourceEvent(integration: "slack", sourceID: "\(workspace):\(channel):\(message.ts)", revision: revision,
                 associationKey: "slack:\(workspace):\(channel):thread:\(root)",
                 body: "Author: \(message.user ?? "unknown")\nChannel: \(channel)\(context)\n\n\(text)",
-                url: "slack://channel?team=\(workspace)&id=\(channel)&message=\(message.ts)")
+                url: "slack://channel?team=\(workspace)&id=\(channel)&message=\(message.ts)",
+                slackMessage: SlackMessage(timestamp: message.ts, threadTimestamp: root, author: message.user ?? "unknown", text: text))
         }
     }
 }

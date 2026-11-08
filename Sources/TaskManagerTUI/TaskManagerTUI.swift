@@ -626,6 +626,12 @@ public final class TaskManagerTUI {
         let runtime = event.targetWorkerKind.map { "Child runtime: \($0.rawValue.uppercased())" } ?? "New work uses \(event.workerKind.rawValue.uppercased())"
         draw(3, right, runtime + " · master uses Codex", width: width)
         var lines = ["SOURCE MESSAGE"] + TerminalText.wrap(event.body, width: width) + [""]
+        if let context = event.slackContext {
+            lines += ["SLACK CONTEXT"] + TerminalText.wrap("\(context.workspaceName) / #\(context.channelName) · \(context.precedingMessages.count) preceding messages · \(context.threadMessages.count) thread messages · \(context.projectHistory.count) prior project decisions", width: width)
+            if let topic = context.topic, !topic.isEmpty { lines += TerminalText.wrap("Topic: " + topic, width: width) }
+            if let purpose = context.purpose, !purpose.isEmpty { lines += TerminalText.wrap("Purpose: " + purpose, width: width) }
+            lines += [""]
+        }
         if let reason = event.reason { lines += ["DECISION"] + TerminalText.wrap(reason, width: width) + [""] }
         if let id = event.taskID {
             let goal = tasks.first(where: { $0.id == id })?.goal ?? id

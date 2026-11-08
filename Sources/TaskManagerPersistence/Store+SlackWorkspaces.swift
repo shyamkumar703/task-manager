@@ -27,7 +27,13 @@ extension Store {
             for conversation in conversations {
                 let id = "slack:\(workspaceID):\(conversation.id)"
                 // Existing pauses, bindings, checkpoints and intervals remain under user control.
-                try db.execute("INSERT INTO slack_sources(id, workspace_id, workspace_name, user_id, channel_id, channel_name, repository, interval_seconds) VALUES (?, ?, ?, ?, ?, ?, '', 60) ON CONFLICT(id) DO UPDATE SET channel_name = excluded.channel_name, workspace_name = excluded.workspace_name", [id, workspaceID, workspace.name, workspace.userID, conversation.id, conversation.name])
+                try db.execute("INSERT INTO slack_sources(id, workspace_id, workspace_name, user_id, channel_id, channel_name, channel_topic, channel_purpose, repository, interval_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', 60) ON CONFLICT(id) DO UPDATE SET channel_name = excluded.channel_name, workspace_name = excluded.workspace_name, channel_topic = excluded.channel_topic, channel_purpose = excluded.channel_purpose", [id, workspaceID, workspace.name, workspace.userID, conversation.id, conversation.name, conversation.topic, conversation.purpose])
+            }
+            let staleQuestions = try db.query("SELECT e.id FROM events e JOIN event_context c ON c.event_id = e.id WHERE e.integration = 'slack' AND e.source_id LIKE ? AND e.disposition = 'waitingForUser' AND c.repository = '' AND c.routing_context IS NULL AND (lower(c.question) LIKE '%which%project%' OR lower(c.question) LIKE '%which%repository%' OR lower(c.question) LIKE '%what%project%')", [workspaceID + ":%"])
+            for row in staleQuestions {
+                try db.execute("UPDATE events SET disposition = 'pending' WHERE id = ?", [row["id"]!])
+                try db.execute("UPDATE event_context SET question = NULL, reason = 'Reconsidering project using Slack conversation context', attempts = 0, retry_after = 0, last_error = NULL WHERE event_id = ?", [row["id"]!])
+                try log(taskID: nil, kind: "triage.context_refreshed", detail: row["id"]!)
             }
             try db.execute("UPDATE slack_workspaces SET next_discovery = ?, last_success = ?, last_error = NULL, failures = 0 WHERE id = ?", [String(ceil(now.timeIntervalSince1970 + 60)), String(now.timeIntervalSince1970), workspaceID])
             try log(taskID: nil, kind: "slack.discovered", detail: "\(workspaceID): monitoring \(conversations.count) discovered conversations")

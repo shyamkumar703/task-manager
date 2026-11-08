@@ -14,6 +14,7 @@ public struct IncomingSource: Codable, Sendable, Identifiable {
     public let url: String
     public let repository: String
     public let availableRepositories: [String]?
+    public let slackContext: SlackRoutingContext?
     public let workerKind: WorkerKind
     public let disposition: SourceDisposition
     public let taskID: String?

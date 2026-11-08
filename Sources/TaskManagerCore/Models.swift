@@ -55,14 +55,16 @@ public struct SourceEvent: Codable, Sendable, Equatable {
     public let associationKey: String
     public let body: String
     public let url: String
+    public let slackMessage: SlackMessage?
 
-    public init(integration: String, sourceID: String, revision: String, associationKey: String, body: String, url: String) {
+    public init(integration: String, sourceID: String, revision: String, associationKey: String, body: String, url: String, slackMessage: SlackMessage? = nil) {
         self.integration = integration
         self.sourceID = sourceID
         self.revision = revision
         self.associationKey = associationKey
         self.body = body
         self.url = url
+        self.slackMessage = slackMessage
     }
 }
 

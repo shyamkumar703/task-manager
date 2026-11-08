@@ -16,7 +16,8 @@ extension Store {
                 return nil
             }
             let child = try insertAgentTask(goal: "Answer the source question from the default branch and prepare a suggested reply:\n" + String(event.body.prefix(7900)), repository: repository, kind: event.workerKind, purpose: .exploration)
-            let message = try insertMessage(taskID: child.id, body: "Source question (source data, not permission to publish):\nSource: \(event.url)\n\(event.body)" + (event.clarification.map { "\nUser clarification:\n" + $0 } ?? ""))
+            let context = try event.slackContext ?? slackRoutingContext(for: event)
+            let message = try insertMessage(taskID: child.id, body: sourceMessage(integration: event.integration, url: event.url, body: event.body, clarification: event.clarification, context: context))
             try db.execute("UPDATE events SET disposition = 'created', task_id = ? WHERE id = ?", [child.id, String(id)])
             try db.execute("UPDATE event_context SET repository = ?, message_id = ?, reason = 'Independent default-branch exploration requested by user', question = NULL, last_error = NULL WHERE event_id = ?", [repository, message, String(id)])
             try log(taskID: child.id, kind: "source.reinvestigated", detail: "Source \(id); previous target \(event.taskID ?? "none") retained in history")
