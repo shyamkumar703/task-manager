@@ -12,9 +12,17 @@ public enum TerminalText {
             var remaining = line[...]
             var result: [String] = []
             while !remaining.isEmpty {
-                let end = remaining.index(remaining.startIndex, offsetBy: min(width, remaining.count))
-                result.append(String(remaining[..<end]))
-                remaining = remaining[end...]
+                var end = remaining.index(remaining.startIndex, offsetBy: min(width, remaining.count))
+                if end != remaining.endIndex,
+                   let space = remaining[..<end].lastIndex(where: { $0 == " " }),
+                   remaining[..<space].contains(where: { !$0.isWhitespace }) {
+                    end = space
+                    result.append(String(remaining[..<end]))
+                    remaining = remaining[remaining.index(after: end)...]
+                } else {
+                    result.append(String(remaining[..<end]))
+                    remaining = remaining[end...]
+                }
             }
             return result
         }

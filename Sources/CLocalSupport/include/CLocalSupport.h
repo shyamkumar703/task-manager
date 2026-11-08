@@ -15,6 +15,8 @@ int tm_terminal_key(void);
 void tm_terminal_draw(int row, int col, const char *text, int width, int emphasis);
 int tm_key_up(void);
 int tm_key_down(void);
+int tm_key_left(void);
+int tm_key_right(void);
 int tm_key_page_up(void);
 int tm_key_page_down(void);
 int tm_key_backspace(void);

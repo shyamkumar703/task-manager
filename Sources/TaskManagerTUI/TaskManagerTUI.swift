@@ -7,677 +7,727 @@ import TaskManagerRuntime
 
 @MainActor
 public final class TaskManagerTUI {
+    private enum Page { case home, activity, connections, repositories }
     private enum Composer {
-        case new, message(String), answer(String), source, sourceAnswer(Int64, Int), githubPath(String, String), githubInterval(String), githubFilter, slackProject(SlackDiscoveredConversation), slackInterval(String), slackFilter
+        case new, message(String), answer(String), source, clarify(Int64, Int, String)
+        case repositoryPath(String, String), interval(String, Bool), filter
         var title: String {
             switch self {
-            case .slackProject(let item): "Local project for " + item.conversation.name
-            case .slackInterval: "Slack poll interval in seconds (10...86400)"
-            case .slackFilter: "Filter Slack conversations"
-            case .githubPath(let slug, _): "Local checkout path for " + slug
-            case .githubFilter: "Filter repositories by name"
-            case .githubInterval: "Poll interval in seconds (10...86400)"
             case .new: "New task goal"
-            case .message: "Follow-up to selected child"
-            case .answer: "Answer pending question"
-            case .source: "Incoming source message · real master decides destination"
-            case .sourceAnswer: "Answer master clarification"
+            case .message: "Message child"
+            case .answer: "Answer child question"
+            case .source: "Simulate incoming source message"
+            case .clarify: "Answer source clarification"
+            case .repositoryPath(let slug, _): "Local checkout for " + slug
+            case .interval: "Polling interval in seconds (10–86400)"
+            case .filter: "Filter repositories"
             }
         }
     }
+    private enum Connection: Identifiable {
+        case workspace(SlackWorkspace), slack(SlackSource), github(GitHubSource)
+        var id: String {
+            switch self {
+            case .workspace(let s): "workspace:" + s.id
+            case .slack(let s): "slack:" + s.id
+            case .github(let s): "github:" + s.id
+            }
+        }
+        var title: String {
+            switch self {
+            case .workspace(let s): "Slack / " + s.name
+            case .slack(let s): "  " + s.channelName
+            case .github(let s): "GitHub / " + s.repository
+            }
+        }
+        var subtitle: String {
+            switch self {
+            case .workspace(let s): s.lastError ?? "Automatic conversation discovery"
+            case .slack(let s): !s.enabled ? "Paused" : s.lastError ?? "Every \(s.intervalSeconds)s"
+            case .github(let s): !s.enabled ? "Paused" : s.lastError ?? "Every \(s.intervalSeconds)s"
+            }
+        }
+        var hasError: Bool {
+            switch self {
+            case .workspace(let s): s.lastError != nil
+            case .slack(let s): s.enabled && s.lastError != nil
+            case .github(let s): s.enabled && s.lastError != nil
+            }
+        }
+    }
+    private struct Line {
+        let text: String
+        let style: Int32
+        init(_ text: String, _ style: Int32 = 0) { self.text = text; self.style = style }
+    }
+    private struct Detail {
+        var title: String
+        var subtitle: String
+        var commands: String
+        var lines: [Line]
+    }
+
     private let store: Store
     private let stateDirectory: String
     private let repository: String
     private let executable: URL
     private var daemon: Process?
+    private var page: Page = .home
+    private var navigation = DashboardNavigation()
     private var tasks: [ManagedTask] = []
     private var questions: [Question] = []
     private var sources: [IncomingSource] = []
-    private var selectedSourceID: Int64?
-    private var showingSources = false
-    private var showingActions = false
     private var actions: [UserAction] = []
-    private var selectedActionID: String?
-    private var showingGitHub = false
-    private var showingSlack = false
-    private var slackSources: [SlackSource] = []
-    private var slackWorkspaces: [SlackWorkspace] = []
-    private var selectedSlackID: String?
-    private var pickingSlack = false
-    private var slackDiscovery: [SlackDiscoveredConversation] = []
-    private var slackDiscoveryJob: Task<Void, Never>?
-    private var slackIndex = 0
-    private var slackFilter = ""
-    private var slackIndices: [Int] {
-        slackDiscovery.indices.filter { slackFilter.isEmpty || (slackDiscovery[$0].connection.workspaceName + " " + slackDiscovery[$0].conversation.name).localizedCaseInsensitiveContains(slackFilter) }
-    }
-    private var githubSources: [GitHubSource] = []
-    private var selectedGitHubID: String?
-    private var pickingGitHub = false
-    private var discovery: GitHubDiscoveryResult?
-    private var discoveryJob: Task<Void, Never>?
-    private var discoveredIndex = 0
-    private var discoveryFilter = ""
-    private var discoveryIndices: [Int] {
-        guard let discovery else { return [] }
-        return discovery.repositories.indices.filter { discoveryFilter.isEmpty || discovery.repositories[$0].slug.localizedCaseInsensitiveContains(discoveryFilter) }
-    }
+    private var attention: [AttentionItem] = []
+    private var connections: [Connection] = []
+    private var selectedAttentionID: String?
+    private var selectedTaskID: String?
+    private var selectedSourceID: Int64?
+    private var selectedConnectionID: String?
     private var session: AgentSessionRecord?
-    private var output: [AgentOutput] = []
+    private var outputs: [AgentOutput] = []
     private var messages: [TaskMessage] = []
-    private var selectedID: String?
+    private var replySource: IncomingSource?
     private var kind: WorkerKind = .codex
     private var composer: Composer?
     private var input = Data()
-    private var scroll = 0
-    private var notice = "Press n to create a real Codex task; Tab selects mock mode."
+    private var notice = "Starting coordinator…"
     private var running = true
+    private var initialized = false
+    private var help = false
+    private var savedNavigation: DashboardNavigation?
+    private var discovery: GitHubDiscoveryResult?
+    private var discoveryJob: Task<Void, Never>?
+    private var repositoryIndex = 0
+    private var repositoryFilter = ""
+    private var repositoryIndices: [Int] {
+        guard let discovery else { return [] }
+        return discovery.repositories.indices.filter { repositoryFilter.isEmpty || discovery.repositories[$0].slug.localizedCaseInsensitiveContains(repositoryFilter) }
+    }
+    private var selectedAttention: AttentionItem? { attention.first { $0.id == selectedAttentionID } }
+    private var selectedTask: ManagedTask? { tasks.first { $0.id == selectedTaskID } }
+    private var selectedSource: IncomingSource? { sources.first { $0.id == selectedSourceID } }
+    private var selectedConnection: Connection? { connections.first { $0.id == selectedConnectionID } }
 
     public init(store: Store, stateDirectory: String, repository: String, executable: URL) {
-        self.store = store
-        self.stateDirectory = stateDirectory
-        self.repository = repository
-        self.executable = executable
+        self.store = store; self.stateDirectory = stateDirectory; self.repository = repository; self.executable = executable
     }
-
     public func run() async throws {
-        guard tm_terminal_open() == 0 else { throw ManagerError.invalid("The TUI requires an interactive terminal (TTY)") }
-        defer { discoveryJob?.cancel(); slackDiscoveryJob?.cancel(); tm_terminal_close() }
+        guard tm_terminal_open() == 0 else { throw ManagerError.invalid("The TUI requires an interactive terminal") }
+        defer { discoveryJob?.cancel(); tm_terminal_close() }
         let previous = signal(SIGTERM, SIG_IGN)
         let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-        termination.setEventHandler { self.running = false }
-        termination.resume()
+        termination.setEventHandler { self.running = false }; termination.resume()
         defer { termination.cancel(); signal(SIGTERM, previous) }
-        notice = "Starting or updating the coordinator…"
         draw()
         try await store.registerProject(repository: repository)
         daemon = try await Daemon.start(executable: executable, stateDirectory: stateDirectory)
-        notice = "Press n for a task, s to inject a source message, or e to inspect triage."
+        notice = "Needs you contains every question, reply, approval, or failure requiring your attention."
         var refreshed = ContinuousClock.now.advanced(by: .seconds(-1))
         while running {
             if refreshed.duration(to: .now) >= .milliseconds(250) {
-                do { try await reload() }
-                catch { notice = "Error: \(error)" }
+                do { try await reload() } catch { notice = "Error: \(error)" }
                 refreshed = .now
             }
             draw()
             for _ in 0..<64 {
-                let key = tm_terminal_key()
-                if key < 0 { break }
-                do { try await handle(key) }
-                catch { notice = "Error: \(error)" }
+                let key = tm_terminal_key(); if key < 0 { break }
+                do { try await handle(key) } catch { notice = "Error: \(error)" }
             }
             try await Task.sleep(for: .milliseconds(40))
         }
     }
-
     private func reload() async throws {
-        let previous = Set(actions.filter { $0.status == "open" }.map(\.id))
-        actions = try await store.userActions()
-        if actions.contains(where: { $0.status == "open" && !previous.contains($0.id) }) { notice = "Reply ready for review · press v for user actions" }
-        if !actions.contains(where: { $0.id == selectedActionID }) { selectedActionID = actions.first?.id }
-        slackSources = try await store.slackSources()
-        slackWorkspaces = try await store.slackWorkspaces()
-        if !slackSources.contains(where: { $0.id == selectedSlackID }) { selectedSlackID = slackSources.first?.id }
-        githubSources = try await store.gitHubSources()
-        if !githubSources.contains(where: { $0.id == selectedGitHubID }) { selectedGitHubID = githubSources.first?.id }
-        tasks = try await store.tasks()
+        let oldAttention = attention.map(\.id), oldTasks = tasks.map(\.id), oldConnections = connections.map(\.id)
+        let oldSources = sources.map { String($0.id) }
+        let oldIDs = Set(oldAttention)
+        tasks = DashboardModel.work(try await store.tasks())
         questions = try await store.questions()
+        actions = try await store.userActions()
         sources = try await store.sources()
-        if selectedSourceID == nil || !sources.contains(where: { $0.id == selectedSourceID }) { selectedSourceID = sources.first?.id }
-        if selectedID == nil || !tasks.contains(where: { $0.id == selectedID }) { selectedID = tasks.first?.id }
-        if let id = selectedID {
-            session = try await store.agentSession(taskID: id)
-            output = try await store.outputs(taskID: id)
-            messages = try await store.messages(taskID: id)
-        } else { session = nil; output = []; messages = [] }
+        let urgent = try await store.sourcesNeedingAttention()
+        // A selected old clarification must remain inspectable even beyond the recent-activity window.
+        if let id = selectedSourceID, !sources.contains(where: { $0.id == id }), let source = try? await store.source(id) { sources.append(source) }
+        let slack = try await store.slackSources(), workspaces = try await store.slackWorkspaces(), github = try await store.gitHubSources()
+        connections = workspaces.map(Connection.workspace) + slack.sorted { ($0.workspaceName, $0.channelName) < ($1.workspaceName, $1.channelName) }.map(Connection.slack) + github.map(Connection.github)
+        attention = DashboardModel.attention(tasks: tasks, questions: questions, sources: urgent, actions: actions, proposals: try await store.proposals(), slack: slack, workspaces: workspaces, github: github)
+        selectedAttentionID = DashboardModel.preservedSelection(selectedAttentionID, old: oldAttention, new: attention.map(\.id))
+        selectedTaskID = DashboardModel.preservedSelection(selectedTaskID, old: oldTasks, new: tasks.map(\.id))
+        selectedConnectionID = DashboardModel.preservedSelection(selectedConnectionID, old: oldConnections, new: connections.map(\.id))
+        selectedSourceID = DashboardModel.preservedSelection(selectedSourceID.map(String.init), old: oldSources, new: sources.map { String($0.id) }).flatMap(Int64.init)
+        if !initialized {
+            navigation.sidebar(attention.isEmpty ? .work : .attention, task: attention.isEmpty)
+            initialized = true
+        } else {
+            let added = attention.filter { !oldIDs.contains($0.id) }.count
+            if added > 0 { notice = "\(added) new item\(added == 1 ? "" : "s") in Needs you. Your current selection is unchanged." }
+        }
+        try await loadTranscript()
     }
+    private func loadTranscript() async throws {
+        if page == .home, navigation.detailSource == .attention, case .reply(let action) = selectedAttention {
+            replySource = try? await store.source(action.sourceEventID)
+        } else { replySource = nil }
+        let id: String?
+        if page == .home { id = navigation.detailSource == .attention ? selectedAttention?.taskID : selectedTaskID }
+        else if page == .activity { id = selectedSource?.taskID }
+        else { id = nil }
+        if let id {
+            session = try await store.agentSession(taskID: id)
+            outputs = try await store.outputs(taskID: id)
+            messages = try await store.messages(taskID: id)
+        } else { session = nil; outputs = []; messages = [] }
+    }
+    private func show(_ page: Page) {
+        self.page = page; help = false
+        if page == .home { navigation.sidebar(attention.isEmpty ? .work : .attention, task: attention.isEmpty) }
+        else { navigation.sidebar(.work) }
+    }
+    private func compose(_ value: Composer, text: String = "") { composer = value; input = Data(text.utf8); notice = "" }
 
     private func handle(_ key: Int32) async throws {
-        if let composer {
-            switch key {
-            case 27: self.composer = nil; input = Data(); notice = "Input cancelled"
-            case 10, 13, 343:
-                let text = String(decoding: input, as: UTF8.self)
-                try requireText(text, name: "Input")
-                switch composer {
-                case .slackProject(let item):
-                    selectedSlackID = try await store.addSlackSource(workspaceID: item.connection.workspaceID, workspaceName: item.connection.workspaceName, userID: item.connection.userID, channelID: item.conversation.id, channelName: item.conversation.name, repository: text)
-                    pickingSlack = false
-                    notice = "Slack conversation enabled; first poll baselines history, then new messages enter triage"
-                case .slackInterval(let id):
-                    guard let seconds = Int(text) else { throw ManagerError.invalid("Interval must be seconds") }
-                    try await store.setSlackSourceInterval(id, seconds: seconds)
-                    notice = "Slack polling interval saved"
-                case .slackFilter: slackFilter = text; slackIndex = 0
-                case .githubFilter:
-                    discoveryFilter = text; discoveredIndex = 0
-                case .githubPath(let slug, let login):
-                    let discovered = try await GitHubDiscovery().checkoutRepository(text)
-                    guard discovered?.slug.lowercased() == slug.lowercased() else { throw ManagerError.invalid("This checkout's origin does not match " + slug) }
-                    selectedGitHubID = try await store.addGitHubSource(repository: slug, localRepository: text, author: login)
-                    pickingGitHub = false
-                    notice = "Repository enabled; polling every 60 seconds using your gh identity"
-                case .githubInterval(let id):
-                    guard let seconds = Int(text) else { throw ManagerError.invalid("Interval must be seconds") }
-                    try await store.setGitHubSourceInterval(id, seconds: seconds)
-                    notice = "Polling interval saved"
-                case .new:
-                    let task = try await store.createAgentTask(goal: text, repository: repository, kind: kind)
-                    selectedID = task.id
-                    notice = "\(kind.rawValue.capitalized) task queued"
-                    showingSources = false
-                case .source:
-                    selectedSourceID = try await store.injectSource(body: text, repository: repository, workerKind: kind)
-                    showingSources = true
-                    notice = "Source message saved; master triage will choose what happens next"
-                case .sourceAnswer(let id, let attempt):
-                    try await store.answerSource(eventID: id, text: text, expectedAttempt: attempt)
-                    notice = "Clarification saved; master will reconsider the event"
-                case .message(let id):
-                    _ = try await store.addMessage(taskID: id, body: text)
-                    notice = "Follow-up saved; delivery status appears in the conversation"
-                case .answer(let id):
-                    try await store.answer(questionID: id, text: text)
-                    notice = "Answer saved; child will continue"
-                }
-                self.composer = nil; input = Data(); scroll = 0
-                try await reload()
-            case 14: input.append(10) // Ctrl-N inserts a newline; Enter sends.
-            case 8, 127:
-                var text = String(decoding: input, as: UTF8.self)
-                if !text.isEmpty { text.removeLast() }
-                input = Data(text.utf8)
-            default:
-                if key == tm_key_backspace() {
-                    var text = String(decoding: input, as: UTF8.self)
-                    if !text.isEmpty { text.removeLast() }
-                    input = Data(text.utf8)
-                } else if (32...255).contains(key), input.count < 32768 { input.append(UInt8(key)) }
-            }
-            return
-        }
-        if key == tm_key_up() || key == 107 { select(-1); return }
-        if key == tm_key_down() || key == 106 { select(1); return }
-        if key == tm_key_page_up() { scroll += max(1, Int(tm_terminal_rows()) - 12); return }
-        if key == tm_key_page_down() { scroll = max(0, scroll - max(1, Int(tm_terminal_rows()) - 12)); return }
-        if key == 118 { showingActions.toggle(); showingSources = false; showingSlack = false; showingGitHub = false; scroll = 0; return }
-        if showingActions {
-            guard let action = actions.first(where: { $0.id == selectedActionID }) else {
-                if key == 113 || key == 3 { running = false }
+        if let composer { try await edit(key, composer: composer); return }
+        if help {
+            if key == 63 || key == 27 { help = false; navigation = savedNavigation ?? navigation; savedNavigation = nil; return }
+            if let intent = navigation.handle(key, dashboard: page == .home) {
+                if intent == .first { navigation.viewport.top() } else if intent == .last { navigation.viewport.bottom() }
+                else if case .move(let amount) = intent { navigation.viewport.move(amount) }
+                navigation.focus = .detail
                 return
             }
-            switch key {
-            case 113, 3: running = false
-            case 99: try await ReplyClipboard.copy(action.body); notice = "Suggested reply copied. Review and paste it into the source thread; nothing was sent."
-            case 100: try await store.resolveUserAction(action.id); notice = "Action marked done; nothing was sent"; try await reload()
-            case 120: try await store.resolveUserAction(action.id, dismiss: true); notice = "Action dismissed"; try await reload()
-            case 10, 13, 343:
-                guard tasks.contains(where: { $0.id == action.taskID }) else { notice = "The child is archived; restore it to inspect its transcript"; return }
-                selectedID = action.taskID; showingActions = false; scroll = 0; try await reload()
-            case 101: selectedSourceID = action.sourceEventID; showingActions = false; showingSources = true; scroll = 0
-            default: break
-            }
+            if key == 113 || key == 3 { running = false }
             return
         }
-        if key == 108 {
-            showingSlack.toggle(); showingGitHub = false; showingSources = false
-            discoveryJob?.cancel(); pickingSlack = false; slackDiscoveryJob?.cancel(); scroll = 0
-            return
-        }
-        if key == 103 && showingSlack { showingSlack = false; showingGitHub = true; pickingSlack = false; slackDiscoveryJob?.cancel(); return }
-        if showingSlack {
-            if pickingSlack {
-                switch key {
-                case 113, 3: running = false
-                case 27: pickingSlack = false; slackDiscoveryJob?.cancel()
-                case 114: beginSlackDiscovery()
-                case 47: composer = .slackFilter; input = Data()
-                case 99: slackFilter = ""; slackIndex = 0
-                case 10, 13, 343:
-                    guard slackIndices.indices.contains(slackIndex) else { return }
-                    let item = slackDiscovery[slackIndices[slackIndex]]
-                    if let existing = slackSources.first(where: { $0.workspaceID == item.connection.workspaceID && $0.channelID == item.conversation.id }) {
-                        selectedSlackID = existing.id; pickingSlack = false
-                    } else { composer = .slackProject(item); input = Data(repository.utf8) }
-                default: break
-                }
-            } else {
-                switch key {
-                case 113, 3: running = false
-                case 110: beginSlackDiscovery()
-                case 112:
-                    if let source = slackSources.first(where: { $0.id == selectedSlackID }) {
-                        try await store.setSlackSourceEnabled(source.id, enabled: !source.enabled); try await reload()
-                    }
-                case 105:
-                    if let source = slackSources.first(where: { $0.id == selectedSlackID }) {
-                        composer = .slackInterval(source.id); input = Data(String(source.intervalSeconds).utf8)
-                    }
-                case 101: showingSlack = false; showingSources = true
-                default: break
-                }
+        var navigationKey = key
+        if key == tm_key_up() { navigationKey = 107 }
+        if key == tm_key_down() { navigationKey = 106 }
+        if key == tm_key_left() { navigationKey = 104 }
+        if key == tm_key_right() { navigationKey = 108 }
+        if key == tm_key_page_up() { navigationKey = 2 }
+        if key == tm_key_page_down() { navigationKey = 6 }
+        let previousDetailSource = navigation.detailSource
+        if let intent = navigation.handle(navigationKey, dashboard: page == .home) {
+            switch intent {
+            case .move(let amount): moveSelection(amount)
+            case .first: moveSelection(Int.min / 2)
+            case .last: moveSelection(Int.max / 2)
+            case .consumed: break
             }
-            return
-        }
-        if key == 103 { showingSlack = false; showingGitHub.toggle(); showingSources = false; pickingGitHub = false; discoveryJob?.cancel(); scroll = 0; return }
-        if showingGitHub {
-            if pickingGitHub {
-                switch key {
-                case 113, 3: running = false
-                case 27: pickingGitHub = false; discoveryJob?.cancel()
-                case 114: beginGitHubDiscovery()
-                case 47: composer = .githubFilter; input = Data()
-                case 99: discoveryFilter = ""; discoveredIndex = 0
-                case 10, 13, 343:
-                    guard let discovery, discoveryIndices.indices.contains(discoveredIndex) else { return }
-                    let selected = discovery.repositories[discoveryIndices[discoveredIndex]]
-                    if let existing = githubSources.first(where: { $0.repository.caseInsensitiveCompare(selected.slug) == .orderedSame }) {
-                        selectedGitHubID = existing.id; pickingGitHub = false
-                        notice = "Already configured; p toggles polling and i changes the interval"
-                        return
-                    }
-                    if discovery.current?.slug.lowercased() == selected.slug.lowercased() {
-                        selectedGitHubID = try await store.addGitHubSource(repository: selected.slug, localRepository: repository, author: discovery.login)
-                        pickingGitHub = false
-                        notice = "Current checkout enabled; polling every 60 seconds using your gh identity"
-                        try await reload()
-                    } else {
-                        composer = .githubPath(selected.slug, discovery.login); input = Data()
-                    }
-                default: break
-                }
-                return
-            }
-            switch key {
-            case 113, 3: running = false
-            case 110: beginGitHubDiscovery()
-            case 105:
-                if let source = githubSources.first(where: { $0.id == selectedGitHubID }) {
-                    composer = .githubInterval(source.id); input = Data(String(source.intervalSeconds).utf8)
-                }
-            case 112:
-                if let source = githubSources.first(where: { $0.id == selectedGitHubID }) {
-                    try await store.setGitHubSourceEnabled(source.id, enabled: !source.enabled)
-                    try await reload()
-                }
-            case 101: showingGitHub = false; showingSources = true
-            default: break
-            }
-            return
-        }
-        if key == 101 { showingSources.toggle(); scroll = 0; return }
-        if key == 115 { composer = .source; input = Data(); return }
-        if showingSources, ![Int32(113), 3, 9, 110].contains(key) {
-            guard let source = sources.first(where: { $0.id == selectedSourceID }) else { return }
-            switch key {
-            case 10, 13, 343:
-                if let id = source.taskID {
-                    guard tasks.contains(where: { $0.id == id }) else { notice = "Destination task is archived or unavailable; restore it to inspect it"; return }
-                    selectedID = id; showingSources = false; scroll = 0
-                    try await reload()
-                } else { notice = "This source has no child task yet" }
-            case 97:
-                guard source.disposition == .waitingForUser else { notice = "No master question for this source"; return }
-                composer = .sourceAnswer(source.id, source.attempts); input = Data()
-            case 114: try await store.retrySource(source.id); try await reload(); notice = "Master triage queued for retry"
-            case 105: _ = try await store.investigateSource(source.id); try await reload(); notice = "Independent exploration requested; its reply will appear in v actions"
-            case 117: try await store.unignoreSource(source.id); try await reload(); notice = "Source unignored; queued for master triage"
-            case 120: try await store.ignoreSource(source.id); try await reload(); notice = "Source event ignored"
-            default: notice = "Sources: Enter opens child · a answers master · i investigates · r retries failure · u unignores · x ignores · e returns"
-            }
-            return
+            if intent != .consumed || previousDetailSource != navigation.detailSource { try await loadTranscript() }; return
         }
         switch key {
-        case 113, 3: running = false // q or Ctrl-C detaches; daemon and workers continue.
-        case 9:
-            kind = kind == .mock ? .codex : .mock
-            notice = "New tasks use \(kind.rawValue). Existing tasks keep their runtime."
-        case 110: composer = .new; input = Data()
-        case 109:
-            guard let id = selectedID else { return }
-            composer = .message(id); input = Data()
-        case 97:
-            guard let question = questions.first(where: { $0.taskID == selectedID }) else { notice = "No pending question for this task"; return }
-            composer = .answer(question.id); input = Data()
-        case 112:
-            guard let task = tasks.first(where: { $0.id == selectedID }) else { return }
-            if task.status == .paused { try await store.resume(task.id); notice = "Task resumed" }
-            else { try await store.transition(task.id, to: .paused); notice = "Pausing task…" }
-            try await reload()
-        case 116:
-            guard let id = selectedID else { return }
-            notice = "Pausing child and opening its worktree terminal…"
-            draw()
-            let handoff = try await ManualTerminal.prepare(store: store, taskID: id)
-            tm_terminal_close()
-            do {
-                _ = try await ManualTerminal.runShell(session: handoff)
-                try await store.releaseTerminal(taskID: id)
-                notice = "Returned from terminal. Press p to resume a paused child."
-            } catch {
-                try? await store.releaseTerminal(taskID: id)
-                notice = "Terminal error: \(error)"
+        case 113, 3: running = false; return
+        case 49, 118: show(.home); try await loadTranscript(); return // v remains a compatibility alias, never required.
+        case 50: show(.activity); try await loadTranscript(); return
+        case 51: show(.connections); return
+        case 63: savedNavigation = navigation; help = true; navigation.focus = .detail; navigation.viewport = DetailViewport(); return
+        case 27:
+            if page == .repositories { discoveryJob?.cancel(); show(.connections) }
+            else { show(.home) }; try await loadTranscript(); return
+        case 77: kind = kind == .codex ? .mock : .codex; notice = "New manual tasks and simulated sources use \(kind.rawValue.uppercased()). Existing tasks keep their runtime."; return
+        case 110:
+            if page == .connections { discoverRepositories() }
+            else if page != .repositories { compose(.new) }
+            return
+        case 115: if page == .home || page == .activity { compose(.source) }; return
+        default: break
+        }
+        switch page {
+        case .home:
+            if navigation.detailSource == .attention { try await actOnAttention(key) }
+            else { try await actOnTask(key) }
+        case .activity: try await actOnSource(key)
+        case .connections: try await actOnConnection(key)
+        case .repositories: try await actOnRepository(key)
+        }
+    }
+    private func edit(_ key: Int32, composer: Composer) async throws {
+        switch key {
+        case 27: self.composer = nil; input = Data(); notice = "Input cancelled"
+        case 10, 13, 343:
+            let text = String(decoding: input, as: UTF8.self)
+            try requireText(text, name: "Input")
+            switch composer {
+            case .new:
+                selectedTaskID = try await store.createAgentTask(goal: text, repository: repository, kind: kind).id
+                page = .home; navigation.sidebar(.work, task: true); notice = "\(kind.rawValue.capitalized) child queued"
+            case .message(let id): _ = try await store.addMessage(taskID: id, body: text); notice = "Message saved for child"
+            case .answer(let id): try await store.answer(questionID: id, text: text); notice = "Answer saved; child can continue"
+            case .clarify(let id, let attempt, let question):
+                try await store.answerSource(eventID: id, text: text, expectedAttempt: attempt, expectedQuestion: question)
+                notice = "Clarification saved; master will reconsider the message"
+            case .source:
+                selectedSourceID = try await store.injectSource(body: text, repository: repository, workerKind: kind)
+                show(.activity); notice = "Simulated source saved for master review"
+            case .repositoryPath(let slug, let login):
+                let remote = try await GitHubDiscovery().checkoutRepository(text)
+                guard remote?.slug.lowercased() == slug.lowercased() else { throw ManagerError.invalid("Checkout origin does not match " + slug) }
+                _ = try await store.addGitHubSource(repository: slug, localRepository: text, author: login)
+                show(.connections); notice = "GitHub repository enabled; automatic polling starts at 60s"
+            case .interval(let id, let slack):
+                guard let seconds = Int(text) else { throw ManagerError.invalid("Interval must be seconds") }
+                if slack { try await store.setSlackSourceInterval(id, seconds: seconds) } else { try await store.setGitHubSourceInterval(id, seconds: seconds) }
+                notice = "Polling interval updated"
+            case .filter: repositoryFilter = text; repositoryIndex = 0
             }
-            tm_terminal_reclaim_foreground()
-            guard tm_terminal_open() == 0 else { running = false; throw ManagerError.invalid("Could not restore terminal UI") }
+            self.composer = nil; input = Data()
             try await reload()
-        case 100:
-            guard let id = selectedID else { return }
-            try await store.archive(id)
-            notice = "Task removed from list; history and worktree retained."
-            scroll = 0
-            try await reload()
-        case 120:
-            guard let id = selectedID else { return }
-            try await store.transition(id, to: .cancelled); notice = "Task cancelled; local work preserved"
+        case 14: input.append(10) // Ctrl-N newline; Enter submits.
+        case 21: input = Data() // Ctrl-U clear input, never scroll during composition.
+        case 23:
+            var text = String(decoding: input, as: UTF8.self)
+            while text.last?.isWhitespace == true { text.removeLast() }
+            while let last = text.last, !last.isWhitespace { text.removeLast() }
+            input = Data(text.utf8)
+        default:
+            if key == 8 || key == 127 || key == tm_key_backspace() {
+                var text = String(decoding: input, as: UTF8.self); if !text.isEmpty { text.removeLast() }; input = Data(text.utf8)
+            } else if (32...255).contains(key), input.count < 32768 { input.append(UInt8(key)) }
+        }
+    }
+    private func actOnAttention(_ key: Int32) async throws {
+        guard let item = selectedAttention else { return }
+        let enter = [Int32(10), 13, 343].contains(key)
+        if enter {
+            switch item { case .sourceQuestion, .workerQuestion: break; default: navigation.focus = .detail }
+        }
+        if key == 111, let id = item.taskID { try await openTask(id); return }
+        switch item {
+        case .sourceQuestion(let source):
+            if enter || key == 97 { compose(.clarify(source.id, source.attempts, source.question ?? "")) }
+            if key == 120 { try await store.ignoreSource(source.id); notice = "Source ignored"; try await reload() }
+        case .workerQuestion(let question, _): if enter || key == 97 { compose(.answer(question.id)) }
+        case .reply(let action):
+            if enter { navigation.focus = .detail }
+            if key == 99 { try await ReplyClipboard.copy(action.body); notice = "Reply copied. Review and send it manually in the source thread." }
+            if key == 101 { selectedSourceID = action.sourceEventID; show(.activity); try await reload() }
+            if key == 100 || key == 120 { try await store.resolveUserAction(action.id, dismiss: key == 120); notice = key == 100 ? "Marked replied; nothing was sent by the manager" : "Reply dismissed"; try await reload() }
+        case .approval(let proposal):
+            if enter { navigation.focus = .detail }
+            if key == 97 || key == 120 { try await store.decide(proposalID: proposal.id, approve: key == 97); notice = "Decision recorded. This proposal is not published automatically."; try await reload() }
+            if key == 99 { try await ReplyClipboard.copy(proposal.body); notice = "Proposal text copied" }
+        case .failedTask(let task): if key == 114 { try await store.transition(task.id, to: .queued); notice = "Child queued to retry"; try await reload() } else if enter { try await openTask(task.id) }
+        case .failedSource(let source):
+            if key == 114 { try await store.retrySource(source.id); notice = "Source review queued to retry"; try await reload() }
+            if key == 120 { try await store.ignoreSource(source.id); try await reload() }
+            if enter { selectedSourceID = source.id; show(.activity); try await reload() }
+        case .slackProblem(let source): if key == 114 { try await store.setSlackSourceEnabled(source.id, enabled: true); notice = "Slack poll scheduled now"; try await reload() }
+        case .slackDiscoveryProblem(let workspace): if key == 114 { try await store.retrySlackDiscovery(workspace.id); notice = "Slack discovery scheduled now"; try await reload() }
+        case .githubProblem(let source): if key == 114 { try await store.setGitHubSourceEnabled(source.id, enabled: true); notice = "GitHub poll scheduled now"; try await reload() }
+        }
+    }
+    private func actOnTask(_ key: Int32) async throws {
+        guard let task = selectedTask else { return }
+        switch key {
+        case 10, 13, 343: navigation.focus = .detail
+        case 109: compose(.message(task.id))
+        case 97: if ![TaskStatus.cancelled, .completed, .failed].contains(task.status), let q = questions.first(where: { $0.taskID == task.id }) { compose(.answer(q.id)) }
+        case 112:
+            guard task.status == .paused || task.status.canTransition(to: .paused) else { notice = "No active work to pause. d removes this task from the list."; return }
+            if task.status == .paused { try await store.resume(task.id) } else { try await store.transition(task.id, to: .paused) }
             try await reload()
         case 114:
-            guard let task = tasks.first(where: { $0.id == selectedID }) else { return }
-            if task.status == .paused { try await store.resume(task.id) }
-            else { try await store.transition(task.id, to: .queued) }
-            notice = "Task queued to continue its saved thread"
-            try await reload()
+            guard [TaskStatus.paused, .completed, .failed].contains(task.status) else { notice = "This child is already active or needs its question answered."; return }
+            if task.status == .paused { try await store.resume(task.id) } else { try await store.transition(task.id, to: .queued) }
+            notice = "Child queued to continue its saved thread"; try await reload()
+        case 100: try await store.archive(task.id); notice = "Task removed from work list; history retained"; try await reload()
+        case 120:
+            guard task.status.canTransition(to: .cancelled) else { notice = "This task is already finished; d removes it from the list."; return }
+            try await store.transition(task.id, to: .cancelled); notice = "Task cancelled"; try await reload()
+        case 116: try await openTerminal(task.id)
         default: break
         }
     }
-
-    private func beginSlackDiscovery() {
-        guard slackDiscoveryJob == nil else { return }
-        pickingSlack = true; slackDiscovery = []; slackIndex = 0; slackFilter = ""
-        notice = "Discovering Slack conversations using the saved Keychain connection…"
-        slackDiscoveryJob = Task {
-            defer { slackDiscoveryJob = nil }
-            do {
-                let result = try await SlackDiscovery.discover(stateDirectory: stateDirectory)
-                try Task.checkCancellation()
-                slackDiscovery = result
-                notice = result.isEmpty ? "No conversations found. Connect with slack-connect and check user scopes." : "Select a conversation, then choose its local project"
-            } catch {
-                if !Task.isCancelled { notice = "Slack discovery failed: \(error). Press r to retry." }
-            }
+    private func actOnSource(_ key: Int32) async throws {
+        guard let source = selectedSource else { return }
+        switch key {
+        case 10, 13, 343:
+            if source.disposition == .waitingForUser { compose(.clarify(source.id, source.attempts, source.question ?? "")) }
+            else if let id = source.taskID { try await openTask(id) } else { navigation.focus = .detail }
+        case 97: if source.disposition == .waitingForUser { compose(.clarify(source.id, source.attempts, source.question ?? "")) }
+        case 114: try await store.retrySource(source.id); notice = "Source queued for retry"; try await reload()
+        case 105: _ = try await store.investigateSource(source.id); notice = "Independent exploration queued; its reply will appear in Needs you"; try await reload()
+        case 117: try await store.unignoreSource(source.id); notice = "Source unignored; queued for review"; try await reload()
+        case 120: try await store.ignoreSource(source.id); notice = "Source ignored"; try await reload()
+        default: break
         }
     }
-
-    private func beginGitHubDiscovery() {
+    private func actOnConnection(_ key: Int32) async throws {
+        guard let connection = selectedConnection else { return }
+        if [Int32(10), 13, 343].contains(key) { navigation.focus = .detail; return }
+        switch connection {
+        case .workspace(let s): if key == 114 { try await store.retrySlackDiscovery(s.id); notice = "Discovery scheduled now" }
+        case .slack(let s):
+            if key == 112 || key == 114 { try await store.setSlackSourceEnabled(s.id, enabled: key == 114 || !s.enabled); notice = key == 114 ? "Poll scheduled now" : "Conversation polling updated" }
+            if key == 105 { compose(.interval(s.id, true), text: String(s.intervalSeconds)) }
+        case .github(let s):
+            if key == 112 || key == 114 { try await store.setGitHubSourceEnabled(s.id, enabled: key == 114 || !s.enabled); notice = key == 114 ? "Poll scheduled now" : "Repository polling updated" }
+            if key == 105 { compose(.interval(s.id, false), text: String(s.intervalSeconds)) }
+        }
+        try await reload()
+    }
+    private func actOnRepository(_ key: Int32) async throws {
+        if key == 47 { compose(.filter); return }
+        if key == 99 { repositoryFilter = ""; repositoryIndex = 0; return }
+        if key == 114 { discoverRepositories(); return }
+        guard [Int32(10), 13, 343].contains(key), let discovery, repositoryIndices.indices.contains(repositoryIndex) else { return }
+        let candidate = discovery.repositories[repositoryIndices[repositoryIndex]]
+        if connections.contains(where: { if case .github(let s) = $0 { return s.repository.caseInsensitiveCompare(candidate.slug) == .orderedSame }; return false }) {
+            show(.connections); notice = "Repository already configured"; return
+        }
+        if discovery.current?.slug.lowercased() == candidate.slug.lowercased() {
+            _ = try await store.addGitHubSource(repository: candidate.slug, localRepository: repository, author: discovery.login)
+            show(.connections); notice = "Current checkout enabled with your gh identity; automatic polling every 60s"; try await reload()
+        } else { compose(.repositoryPath(candidate.slug, discovery.login)) }
+    }
+    private func discoverRepositories() {
         guard discoveryJob == nil else { return }
-        pickingGitHub = true; discovery = nil; discoveredIndex = 0; discoveryFilter = ""
+        show(.repositories); discovery = nil; repositoryIndex = 0; repositoryFilter = ""
         notice = "Discovering repositories using your existing gh login…"
         discoveryJob = Task {
             defer { discoveryJob = nil }
             do {
-                let result = try await GitHubDiscovery().discover(checkout: repository)
-                try Task.checkCancellation()
-                discovery = result
-                notice = "Select a repository; Enter enables the current checkout or asks for its local path"
-            } catch {
-                if !Task.isCancelled { notice = "Discovery failed: \(error). Check gh auth status, then press r to retry." }
-            }
+                let result = try await GitHubDiscovery().discover(checkout: repository); try Task.checkCancellation()
+                discovery = result; notice = "Select a repository. The current checkout needs no additional input."
+            } catch { if !Task.isCancelled { notice = "Discovery failed: \(error). r retries; Esc returns." } }
+        }
+    }
+    private func openTask(_ id: String) async throws {
+        guard tasks.contains(where: { $0.id == id }) else { notice = "Task is archived or unavailable; its reply and source remain reviewable here"; return }
+        selectedTaskID = id; page = .home; navigation.sidebar(.work, task: true); navigation.focus = .detail
+        try await loadTranscript()
+    }
+    private func openTerminal(_ id: String) async throws {
+        notice = "Pausing child and opening its worktree terminal…"; draw()
+        let handoff = try await ManualTerminal.prepare(store: store, taskID: id)
+        tm_terminal_close()
+        do {
+            _ = try await ManualTerminal.runShell(session: handoff); try await store.releaseTerminal(taskID: id)
+            notice = "Returned from terminal. p resumes a paused child."
+        } catch { try? await store.releaseTerminal(taskID: id); notice = "Terminal error: \(error)" }
+        tm_terminal_reclaim_foreground()
+        guard tm_terminal_open() == 0 else { running = false; throw ManagerError.invalid("Could not restore terminal UI") }
+        try await reload()
+    }
+    private func moveSelection(_ delta: Int) {
+        func index(_ current: Int, _ count: Int) -> Int { min(max(0, count - 1), max(0, current + delta)) }
+        switch page {
+        case .home:
+            if navigation.focus == .attention {
+                if !attention.isEmpty { selectedAttentionID = attention[index(attention.firstIndex { $0.id == selectedAttentionID } ?? 0, attention.count)].id }
+            } else if !tasks.isEmpty { selectedTaskID = tasks[index(tasks.firstIndex { $0.id == selectedTaskID } ?? 0, tasks.count)].id }
+            navigation.selected(task: navigation.focus == .work)
+        case .activity:
+            if !sources.isEmpty { selectedSourceID = sources[index(sources.firstIndex { $0.id == selectedSourceID } ?? 0, sources.count)].id }
+            navigation.selected()
+        case .connections:
+            if !connections.isEmpty { selectedConnectionID = connections[index(connections.firstIndex { $0.id == selectedConnectionID } ?? 0, connections.count)].id }
+            navigation.selected()
+        case .repositories: repositoryIndex = index(repositoryIndex, repositoryIndices.count); navigation.selected()
         }
     }
 
-    private func select(_ delta: Int) {
-        if showingActions {
-            guard !actions.isEmpty else { return }
-            let index = actions.firstIndex(where: { $0.id == selectedActionID }) ?? 0
-            selectedActionID = actions[min(actions.count - 1, max(0, index + delta))].id
-            scroll = 0
-            return
-        }
-        if showingSlack {
-            if pickingSlack { if !slackIndices.isEmpty { slackIndex = min(slackIndices.count - 1, max(0, slackIndex + delta)) } }
-            else if !slackSources.isEmpty {
-                let index = slackSources.firstIndex(where: { $0.id == selectedSlackID }) ?? 0
-                selectedSlackID = slackSources[min(slackSources.count - 1, max(0, index + delta))].id
-            }
-            return
-        }
-        if showingGitHub && pickingGitHub {
-            guard !discoveryIndices.isEmpty else { return }
-            discoveredIndex = min(discoveryIndices.count - 1, max(0, discoveredIndex + delta))
-            return
-        }
-        if showingGitHub {
-            guard !githubSources.isEmpty else { return }
-            let index = githubSources.firstIndex(where: { $0.id == selectedGitHubID }) ?? 0
-            selectedGitHubID = githubSources[min(githubSources.count - 1, max(0, index + delta))].id
-            return
-        }
-        if showingSources {
-            guard !sources.isEmpty else { return }
-            let index = sources.firstIndex(where: { $0.id == selectedSourceID }) ?? 0
-            selectedSourceID = sources[min(sources.count - 1, max(0, index + delta))].id
-            scroll = 0
-            return
-        }
-        guard !tasks.isEmpty else { return }
-        let index = tasks.firstIndex(where: { $0.id == selectedID }) ?? 0
-        selectedID = tasks[min(tasks.count - 1, max(0, index + delta))].id
-        scroll = 0
+    // MARK: - Rendering
+    private func taskStatus(_ status: TaskStatus) -> String {
+        status == .waitingForUser ? "Waiting for your answer" : status.rawValue.capitalized
     }
+    private func sourceStatus(_ status: SourceDisposition) -> String {
+        switch status {
+        case .waitingForUser: "Needs clarification"
+        case .pending: "Queued for review"
+        case .triaging: "Reviewing"
+        case .created: "Child created"
+        case .routed: "Routed"
+        case .ignored: "Ignored"
+        case .failed: "Review failed"
+        }
+    }
+    private func single(_ text: String) -> String { TerminalText.clean(text).replacingOccurrences(of: "\n", with: " ") }
+    private func section(_ title: String, _ body: String, width: Int, style: Int32 = 0) -> [Line] {
+        [Line(title, 1)] + TerminalText.wrap(body, width: width).map { Line($0, style) } + [Line("")]
+    }
+    private func time(_ value: Double?) -> String { value.map { Date(timeIntervalSince1970: $0).formatted(date: .omitted, time: .standard) } ?? "not yet" }
+    private func detail(width: Int) -> Detail {
+        if help { return helpDetail(width: width) }
+        switch page {
+        case .home:
+            if navigation.detailSource == .attention {
+                if let item = selectedAttention { return attentionDetail(item, width: width) }
+                return Detail(title: "All caught up", subtitle: "Questions and replies will appear here as work progresses", commands: "Ctrl-W j: work list   l: detail   n: new task", lines: section("NOTHING WAITING ON YOU", "The coordinator continues monitoring connected sources. New clarification questions, reply drafts, approvals, and actionable failures appear in Needs you automatically.", width: width))
+            }
+            if let task = selectedTask { return taskDetail(task, width: width) }
+            return Detail(title: "Your work starts here", subtitle: "Connected sources can create tasks automatically", commands: "n: new task   3: connection health   ?: help", lines: section("NO TASKS YET", "Create a task with n, or let an incoming source identify work. Questions and reply drafts are surfaced in Needs you without switching views.", width: width))
+        case .activity:
+            if let source = selectedSource { return sourceDetail(source, width: width) }
+            return Detail(title: "Incoming activity", subtitle: "Source messages and their recorded decisions", commands: "s: simulate incoming message   1: home", lines: section("NO MESSAGES YET", "Connected sources feed this history automatically. Items that need a response also appear on Home in Needs you.", width: width))
+        case .connections:
+            if let c = selectedConnection { return connectionDetail(c, width: width) }
+            return Detail(title: "Connections", subtitle: "Source monitoring is owned by the background coordinator", commands: "n: add GitHub repository   1: home", lines: section("GITHUB", "n discovers repositories using your existing gh login and the current checkout's origin.", width: width) + section("SLACK", "Connected Slack workspaces are monitored automatically. To connect one, run task-manager --state-dir PATH slack-connect in a terminal. The token is stored in macOS Keychain.", width: width))
+        case .repositories:
+            guard let discovery, repositoryIndices.indices.contains(repositoryIndex) else {
+                return Detail(title: "Add GitHub repository", subtitle: "Uses your existing gh identity", commands: "r: refresh   Esc: connections", lines: section("DISCOVERY", discoveryJob == nil ? "No matching repositories. Clear the filter with c or refresh with r." : "Discovering your authenticated account and accessible repositories…", width: width))
+            }
+            let candidate = discovery.repositories[repositoryIndices[repositoryIndex]]
+            let current = discovery.current?.slug.lowercased() == candidate.slug.lowercased()
+            return Detail(title: candidate.slug, subtitle: "Authenticated as \(discovery.login)", commands: "Enter: add   /: filter   c: clear filter   Esc: back", lines: section("AUTOMATIC POLLING", "Observe your open PRs and their comments/reviews. The first scan records existing history without creating work. Later feedback enters master triage.", width: width) + section("LOCAL CHECKOUT", current ? repository + "\nInferred from origin; no additional input needed." : "After selecting this repository, enter its local checkout path. Polling defaults to 60 seconds.", width: width))
+        }
+    }
+    private func destination(_ url: String) -> String {
+        guard let components = URLComponents(string: url), components.scheme == "slack" else { return url }
+        let team = components.queryItems?.first { $0.name == "team" }?.value
+        let channel = components.queryItems?.first { $0.name == "id" }?.value
+        for connection in connections {
+            if case .slack(let s) = connection, s.workspaceID == team, s.channelID == channel { return "Slack / \(s.workspaceName) / #\(s.channelName)" }
+        }
+        return url
+    }
+    private func attentionDetail(_ item: AttentionItem, width: Int) -> Detail {
+        switch item {
+        case .sourceQuestion(let s):
+            var d = sourceDetail(s, width: width)
+            d.title = "Clarification needed before work can continue"
+            d.commands = "Enter / a: answer   x: ignore source   o: child (if linked)"
+            return d
+        case .workerQuestion(let q, let task):
+            return Detail(title: "Your child needs an answer", subtitle: single(task.goal), commands: "Enter / a: answer   o: open child", lines: section("QUESTION", q.prompt, width: width, style: 4) + section("TASK", task.goal, width: width) + section("WHAT HAPPENS NEXT", "Your answer is saved durably and delivered to this child. Other children continue independently.", width: width, style: 3))
+        case .reply(let a):
+            let original = replySource.map { section("ORIGINAL REQUEST", $0.body, width: width, style: 3) } ?? []
+            return Detail(title: "Reply ready for review", subtitle: destination(a.target), commands: "c: copy reply   d: mark replied   x: dismiss   e: source   o: child", lines: section("SUGGESTED REPLY", a.body, width: width) + original + section("WHERE TO RESPOND", destination(a.target) + "\n" + a.target, width: width, style: 3) + section("NEXT STEP", "Copy the reply with c, review/edit it in the source thread, and send it manually. Then use d to mark this item replied. Dismissing or marking replied does not send a message.", width: width, style: 4) + section("EVIDENCE / INSPECTED SNAPSHOT", a.context, width: width))
+        case .approval(let p):
+            return Detail(title: "Review proposed action", subtitle: p.kind, commands: "a: approve decision   x: reject   c: copy text   o: child", lines: section("EXACT PROPOSED TEXT", p.body, width: width) + section("TARGET", p.target, width: width) + section("EXPECTED HEAD", p.expectedHead, width: width, style: 3) + section("APPROVAL BEHAVIOR", "Approval records your decision only. Automatic publication for this proposal is not implemented; nothing will be posted by these controls.", width: width, style: 4))
+        case .failedTask(let t):
+            var d = taskDetail(t, width: width); d.title = "Child needs attention"; d.commands = "r: retry saved child   Enter / o: inspect child"
+            let errors = outputs.filter { $0.kind == "error" || $0.kind == "system" }.suffix(3).map(\.text).joined(separator: "\n")
+            d.lines = section("WHY IT STOPPED", errors.isEmpty ? "The child failed. Inspect its transcript before retrying." : errors, width: width, style: 6) + d.lines
+            return d
+        case .failedSource(let s):
+            var d = sourceDetail(s, width: width); d.title = "Incoming message could not be reviewed"; d.commands = "r: retry review   x: ignore source   Enter: activity"
+            return d
+        case .slackProblem(let s): return connectionDetail(.slack(s), width: width)
+        case .slackDiscoveryProblem(let s): return connectionDetail(.workspace(s), width: width)
+        case .githubProblem(let s): return connectionDetail(.github(s), width: width)
+        }
+    }
+    private func taskDetail(_ task: ManagedTask, width: Int) -> Detail {
+        let role = session?.purpose.rawValue ?? "implementation"
+        var lines: [Line] = []
+        if ![TaskStatus.cancelled, .completed, .failed].contains(task.status), let q = questions.first(where: { $0.taskID == task.id && $0.answer == nil }) { lines += section("ANSWER NEEDED · a responds", q.prompt, width: width, style: 4) }
+        if let action = actions.first(where: { $0.taskID == task.id && $0.status == "open" }) { lines += section("REPLY READY · Home → Needs you", action.body, width: width, style: 4) }
+        lines += section("GOAL", task.goal, width: width)
+        if let path = session?.workspace { lines += section("WORKSPACE", path, width: width, style: 3) }
+        for output in outputs {
+            let text = output.kind == "assistant" ? TerminalText.assistantText(output.text) : output.text
+            var label = output.kind.uppercased()
+            if output.kind == "user", let message = messages.first(where: { output.itemID == "message-\($0.id)" }) { label += message.delivered ? " · ACCEPTED" : " · QUEUED" }
+            let style: Int32 = output.kind == "error" ? 6 : output.kind == "tool" || output.kind == "system" ? 3 : 0
+            lines += section(label, text, width: width, style: style)
+        }
+        if outputs.isEmpty { lines += section("STATUS", "Waiting for the coordinator…", width: width, style: 3) }
+        var commands: [String] = []
+        if task.status != .cancelled { commands.append("m: message") }
+        if ![TaskStatus.cancelled, .completed, .failed].contains(task.status), questions.contains(where: { $0.taskID == task.id && $0.answer == nil }) { commands.append("a: answer") }
+        if task.status == .paused || task.status.canTransition(to: .paused) { commands.append(task.status == .paused ? "p: resume" : "p: pause") }
+        if session?.workspace != nil { commands.append("t: terminal") }
+        if [TaskStatus.paused, .completed, .failed].contains(task.status) { commands.append(task.status == .completed ? "r: continue" : "r: retry") }
+        commands.append("d: remove")
+        if task.status.canTransition(to: .cancelled) { commands.append("x: cancel") }
+        return Detail(title: single(task.goal), subtitle: "\(taskStatus(task.status)) · \(role.capitalized) · \(session?.kind.rawValue.capitalized ?? "Unbound") · \(messages.filter { !$0.delivered }.count) messages pending", commands: commands.joined(separator: "   "), lines: lines)
+    }
+    private func sourceDetail(_ source: IncomingSource, width: Int) -> Detail {
+        var lines: [Line] = []
+        if let q = source.question { lines += section("QUESTION · Enter answers", q, width: width, style: 4) }
+        if let error = source.lastError { lines += section("REVIEW ERROR", error, width: width, style: 6) }
+        lines += section("INCOMING MESSAGE", source.body, width: width)
+        if let reason = source.reason { lines += section("DECISION", reason, width: width) }
+        if let c = source.slackContext {
+            let context = "\(c.workspaceName) / #\(c.channelName)\nTopic: \(c.topic ?? "—")\nPurpose: \(c.purpose ?? "—")\n\(c.precedingMessages.count) preceding messages · \(c.threadMessages.count) thread messages · \(c.projectHistory.count) prior project decisions"
+            lines += section("CONTEXT USED", context, width: width, style: 3)
+        }
+        if let clarification = source.clarification { lines += section("YOUR CLARIFICATION", clarification, width: width) }
+        lines += section("SOURCE", source.url, width: width, style: 3)
+        if let id = source.taskID {
+            let name = tasks.first { $0.id == id }?.goal ?? id
+            lines += section("LINKED CHILD", name + (source.messageDelivered.map { $0 ? "\nMessage accepted" : "\nMessage queued" } ?? ""), width: width)
+        }
+        let commands: String
+        switch source.disposition {
+        case .waitingForUser: commands = "Enter / a: answer   x: ignore   i: independent investigation"
+        case .failed: commands = "r: retry review   x: ignore"
+        case .ignored: commands = "u: reconsider ignored message   i: independent investigation"
+        case .routed, .created: commands = "Enter: child   i: independent default-branch investigation"
+        default: commands = "x: ignore   l: inspect message"
+        }
+        return Detail(title: "\(source.integration.capitalized) message #\(source.id)", subtitle: "\(sourceStatus(source.disposition)) · \(source.slackContext.map { "Slack / #" + $0.channelName } ?? (destination(source.url) == source.url ? source.integration.capitalized : destination(source.url)))", commands: commands, lines: lines)
+    }
+    private func connectionDetail(_ c: Connection, width: Int) -> Detail {
+        var lines: [Line] = []
+        let commands: String
+        switch c {
+        case .workspace(let s):
+            commands = "r: retry discovery   n: add GitHub repository"
+            if let error = s.lastError { lines += section("DISCOVERY ERROR", error, width: width, style: 6) }
+            lines += section("MONITORING", "Accessible Slack channels and DMs are discovered and monitored automatically. No per-channel setup is required.", width: width)
+            lines += section("SCHEDULE", "Last discovery: \(time(s.lastSuccess))\nNext discovery: \(time(s.nextDiscovery))\nConsecutive failures: \(s.failures)", width: width, style: 3)
+        case .slack(let s):
+            commands = "p: pause/resume polling   i: interval   r: retry now"
+            if let error = s.lastError { lines += section("POLLING ERROR", error, width: width, style: 6) }
+            lines += section("PROJECT ROUTING", s.repository.isEmpty ? "Automatically infer the project from conversation context and known tasks. Ask only when the context remains ambiguous." : s.repository, width: width)
+            lines += section("SCHEDULE", "\(s.enabled ? "Enabled" : "Paused") · every \(s.intervalSeconds)s\nLast success: \(time(s.lastSuccess))\nNext poll: \(s.enabled ? time(s.nextPoll) : "paused")\nConsecutive failures: \(s.failures)", width: width, style: 3)
+        case .github(let s):
+            commands = "p: pause/resume polling   i: interval   r: retry now   n: add repository"
+            if let error = s.lastError { lines += section("POLLING ERROR", error, width: width, style: 6) }
+            lines += section("SCOPE", "Open PRs authored by \(s.author)\nLocal checkout: \(s.localRepository)", width: width)
+            lines += section("SCHEDULE", "\(s.enabled ? "Enabled" : "Paused") · every \(s.intervalSeconds)s\nLast success: \(time(s.lastSuccess))\nNext poll: \(s.enabled ? time(s.nextPoll) : "paused")\nConsecutive failures: \(s.failures)", width: width, style: 3)
+        }
+        if c.hasError { lines += section("WHAT TO DO", "Check the reported scope/authentication or repository error. Retry with r after fixing it. Network errors also retry automatically with backoff. Slack credentials can be updated using slack-connect; GitHub uses your existing gh login.", width: width, style: 4) }
+        return Detail(title: c.title.trimmingCharacters(in: .whitespaces), subtitle: c.subtitle, commands: commands, lines: lines)
+    }
+    private func helpDetail(width: Int) -> Detail {
+        let text = """
+        1 Home: Needs you + work + detail
+        2 Activity: incoming messages and decisions
+        3 Connections: monitoring health and settings
 
+        j / k       Move in the focused list; scroll detail when focused
+        h / l       Focus the list / detail
+        Ctrl-W h/l  Switch left / right pane
+        Ctrl-W j/k  Move between Needs you and Work on Home
+        Ctrl-W w    Cycle panes (Tab also cycles)
+        Ctrl-D/U    Scroll the focused pane half a screen down / up
+        Ctrl-F/B    Scroll the focused pane a full screen
+        gg / G      First / last list item; top / latest detail
+
+        Needs you shows source clarifications, child questions, reply drafts,
+        approvals, failed children, and persistent connection problems.
+        Select an item: its available actions are shown above its details.
+
+        Enter / a   Answer a selected question
+        c           Copy a selected suggested reply
+        d           Mark a selected reply as replied (does not send)
+        x           Dismiss a reply / ignore a source / reject a proposal
+        a           Approve a selected proposal (records decision only)
+        o           Inspect the linked child from Needs you
+
+        n           New task; on Connections, add a GitHub repository
+        M           Toggle CODEX / MOCK for new manual tasks
+        s           Simulate a source message (Home or Activity)
+        m / p / t   Message / pause / terminal for a selected child
+        d / x / r   Remove / cancel / retry a selected child
+        u / i       Reconsider an ignored source / start independent exploration
+
+        Input: Enter submits · Ctrl-N newline · Ctrl-U clear · Ctrl-W delete word
+        Esc cancels input or returns Home. q detaches; workers keep running.
+        """
+        return Detail(title: "Keyboard guide", subtitle: "Navigation is separate from actions; available actions follow your selection", commands: "? / Esc: close guide   j/k or Ctrl-D/U: scroll", lines: TerminalText.wrap(text, width: width).map { Line($0) })
+    }
     private func draw() {
         tm_terminal_clear()
         let rows = Int(tm_terminal_rows()), columns = Int(tm_terminal_columns())
-        guard rows >= 16, columns >= 76 else {
-            draw(0, 0, "Resize terminal to at least 76 × 16. q detaches.", width: columns)
+        guard rows >= 22, columns >= 80 else {
+            put(0, 0, "Resize to at least 80 × 22. q detaches; workers continue.", columns, 4)
             tm_terminal_refresh(); return
         }
-        let left = min(36, columns / 3), right = left + 2, width = columns - right - 1
+        let leftWidth = min(46, max(28, columns / 3)), right = leftWidth + 3, width = columns - right - 2
+        let bottom = rows - (composer == nil ? 5 : 10)
         let live = CoordinatorLock.isRunning(stateDirectory: stateDirectory)
-        let masterQuestions = sources.filter { $0.disposition == .waitingForUser }.count
-        let incoming = sources.filter { [.pending, .triaging, .failed].contains($0.disposition) }.count
-        draw(0, 0, " TASK MANAGER   new: \(kind.rawValue.uppercased())   coordinator: \(live ? "running" : "offline")   asks: \(questions.count + masterQuestions)   inbox: \(incoming)   actions: \(actions.filter { $0.status == "open" }.count) ", width: columns, emphasis: 2)
-        if showingActions {
-            drawActions(rows: rows, columns: columns)
-            drawFooter(rows: rows, columns: columns)
-            tm_terminal_refresh()
-            return
+        put(0, 1, "TASK MANAGER", 17, 1)
+        put(0, 19, live ? "coordinator running" : "COORDINATOR OFFLINE", 25, live ? 5 : 6)
+        put(0, max(46, columns - 30), "new: \(kind.rawValue.uppercased())  M changes runtime", 29, 3)
+        let answers = attention.filter { if case .sourceQuestion = $0 { return true }; if case .workerQuestion = $0 { return true }; return false }.count
+        let replies = attention.filter { if case .reply = $0 { return true }; return false }.count
+        let active = tasks.filter { $0.status == .running || $0.status == .queued }.count
+        put(1, 1, attention.isEmpty ? "All caught up  ·  \(active) active children" : "\(attention.count) \(attention.count == 1 ? "ITEM NEEDS" : "ITEMS NEED") YOU  ·  \(answers) \(answers == 1 ? "question" : "questions")  ·  \(replies) \(replies == 1 ? "reply" : "replies") ready  ·  \(active) active", columns - 2, attention.isEmpty ? 5 : 4)
+        let home = page == .home ? "[1 Home]" : "1 Home", activity = page == .activity ? "[2 Activity]" : "2 Activity", settings = page == .connections || page == .repositories ? "[3 Connections]" : "3 Connections"
+        put(2, 1, "\(home)     \(activity)     \(settings)     ? Help", columns - 2, 1)
+        for row in 4...bottom { put(row, leftWidth + 1, "│", 1, navigation.focus == .detail ? 1 : 7) }
+        if page == .home { drawHomeLists(width: leftWidth, bottom: bottom) }
+        else { drawSecondaryList(width: leftWidth, bottom: bottom) }
+        let content = detail(width: width)
+        put(4, right, content.title, width, navigation.focus == .detail ? 8 : 1)
+        put(5, right, single(content.subtitle), width, 3)
+        for (offset, command) in TerminalText.wrap(content.commands, width: width).prefix(2).enumerated() {
+            put(6 + offset, right, command, width, page == .home && navigation.detailSource == .attention && selectedAttention != nil ? 4 : 1)
         }
-        if showingSlack {
-            drawSlack(rows: rows, columns: columns)
-            drawFooter(rows: rows, columns: columns)
-            tm_terminal_refresh()
-            return
-        }
-        if showingGitHub {
-            if pickingGitHub {
-                draw(1, 1, "ADD GITHUB REPOSITORY · " + (discovery?.login ?? "detecting gh identity…"), width: columns - 2, emphasis: 1)
-                if let discovery {
-                    let capacity = max(1, rows - 8)
-                    let first = max(0, discoveredIndex - capacity + 1)
-                    for (offset, index) in discoveryIndices.dropFirst(first).prefix(capacity).enumerated() {
-                        let candidate = discovery.repositories[index]
-                        let current = candidate.slug.lowercased() == discovery.current?.slug.lowercased()
-                        let configured = githubSources.contains { $0.repository.caseInsensitiveCompare(candidate.slug) == .orderedSame }
-                        draw(3 + offset, 1, "\(first + offset == discoveredIndex ? ">" : " ") \(candidate.slug)\(current ? " · current checkout" : "")\(configured ? " · configured" : "")", width: columns - 2, emphasis: first + offset == discoveredIndex ? 2 : 0)
-                    }
-                    if discoveryIndices.isEmpty { draw(3, 1, "No matching repositories. Press c to clear the filter.", width: columns - 2) }
-                }
-                drawFooter(rows: rows, columns: columns)
-                tm_terminal_refresh()
-                return
-            }
-            draw(1, 1, "GITHUB REPOSITORIES", width: columns - 2, emphasis: 1)
-            if githubSources.isEmpty { draw(3, 1, "Press n to discover repositories using your existing gh login.", width: columns - 2) }
-            let selected = githubSources.firstIndex(where: { $0.id == selectedGitHubID }) ?? 0
-            let capacity = max(1, (rows - 8) / 5)
-            for (index, source) in githubSources.dropFirst(max(0, selected - capacity + 1)).prefix(capacity).enumerated() {
-                let y = 3 + index * 5
-                let success = source.lastSuccess.map { Date(timeIntervalSince1970: $0).formatted() } ?? "not yet"
-                draw(y, 1, "\(source.id == selectedGitHubID ? ">" : " ") \(source.repository) · \(source.enabled ? "enabled" : "disabled") · every \(source.intervalSeconds)s", width: columns - 2, emphasis: source.id == selectedGitHubID ? 2 : 0)
-                draw(y + 1, 3, "Open PRs by \(source.author) → \(source.localRepository)", width: columns - 4)
-                let next = !source.enabled ? "disabled" : source.nextPoll == 0 ? "due now" : Date(timeIntervalSince1970: source.nextPoll).formatted()
-                draw(y + 2, 3, "Last success: \(success) · next: \(next)", width: columns - 4)
-                draw(y + 3, 3, source.lastError.map { "Error: " + $0 } ?? "First successful poll baselines history; later feedback enters the incoming view.", width: columns - 4)
-            }
-            drawFooter(rows: rows, columns: columns)
-            tm_terminal_refresh()
-            return
-        }
-        if showingSources {
-            drawSources(rows: rows, columns: columns, left: left, right: right, width: width)
-            drawFooter(rows: rows, columns: columns)
-            tm_terminal_refresh()
-            return
-        }
-        draw(1, 1, "TASKS (\(tasks.count))", width: left, emphasis: 1)
-        let selected = tasks.firstIndex(where: { $0.id == selectedID }) ?? 0
-        let available = max(1, (rows - 9) / 2)
-        let first = max(0, selected - available + 1)
-        for (offset, task) in tasks.dropFirst(first).prefix(available).enumerated() {
-            let y = 3 + offset * 2
-            let focused = task.id == selectedID
-            draw(y, 1, "\(focused ? ">" : " ") \(task.goal)", width: left - 1, emphasis: focused ? 2 : 0)
-            let status = actions.contains { $0.taskID == task.id && $0.status == "open" } ? "reply ready · user action" : task.status.rawValue
-            draw(y + 1, 3, status, width: left - 3)
-        }
-        if let task = tasks.first(where: { $0.id == selectedID }) {
-            draw(2, right, task.goal, width: width, emphasis: 1)
-            draw(3, right, "\(task.status.rawValue) · \(session?.purpose.rawValue ?? "implementation") · \(session?.kind.rawValue ?? "unbound") · \(messages.filter { !$0.delivered }.count) pending messages", width: width)
-            draw(4, right, "Workspace: \(session?.workspace ?? session?.repository ?? repository)", width: width)
-            var lines: [String] = []
-            if output.isEmpty { lines += ["Waiting for the coordinator…"] }
-            for item in output {
-                let text = item.kind == "assistant" ? TerminalText.assistantText(item.text) : item.text
-                var label = item.kind.uppercased()
-                if item.kind == "user", let message = messages.first(where: { "message-\($0.id)" == item.itemID }) {
-                    label += message.delivered ? " · ACCEPTED" : " · QUEUED"
-                }
-                lines += [label] + TerminalText.wrap(text, width: width) + [""]
-            }
-            if let question = questions.first(where: { $0.taskID == task.id }) {
-                lines += TerminalText.wrap("QUESTION — \(question.prompt)  [a to answer]", width: width)
-            }
-            let visible = rows - 12
-            let end = max(0, lines.count - scroll)
-            let start = max(0, end - visible)
-            for (offset, line) in lines[start..<end].enumerated() { draw(6 + offset, right, line, width: width) }
-        } else {
-            draw(3, right, "Create a task with n. No GitHub source is required.", width: width)
-            draw(5, right, "CODEX executes tasks in isolated git worktrees.", width: width)
-            draw(6, right, "Tab selects MOCK for simulated interaction tests.", width: width)
-        }
+        put(8, right, String(repeating: "─", count: width), width, 7)
+        let height = max(1, bottom - 9 + 1)
+        navigation.viewport.update(count: content.lines.count, height: height)
+        for (offset, line) in content.lines.dropFirst(navigation.viewport.offset).prefix(height).enumerated() { put(9 + offset, right, line.text, width, line.style) }
+        if content.lines.count > height { put(bottom + 1, right, "Lines \(navigation.viewport.offset + 1)–\(min(content.lines.count, navigation.viewport.offset + height))/\(content.lines.count) · l focuses detail · Ctrl-U/D · gg/G", width, 3) }
         drawFooter(rows: rows, columns: columns)
         tm_terminal_refresh()
     }
-
-    private func drawActions(rows: Int, columns: Int) {
-        draw(1, 1, "USER ACTIONS · \(actions.filter { $0.status == "open" }.count) replies ready", width: columns - 2, emphasis: 1)
-        guard let action = actions.first(where: { $0.id == selectedActionID }) else {
-            draw(3, 1, "No suggested replies yet. Completed explorations will appear here.", width: columns - 2)
-            return
-        }
-        let index = (actions.firstIndex { $0.id == action.id } ?? 0) + 1
-        draw(2, 1, "Reply \(index)/\(actions.count) · \(action.status) · review and respond manually", width: columns - 2)
-        draw(3, 1, "Source: " + action.target, width: columns - 2)
-        let lines = ["FINDINGS / SNAPSHOT"] + TerminalText.wrap(action.context, width: columns - 2) + ["", "SUGGESTED REPLY"] + TerminalText.wrap(action.body, width: columns - 2) + ["", "c copies the reply. Open the source thread, review and paste it, then send manually."]
-        let end = max(0, lines.count - scroll), start = max(0, end - (rows - 11))
-        for (offset, line) in lines[start..<end].enumerated() { draw(5 + offset, 1, line, width: columns - 2) }
-    }
-
-    private func drawSlack(rows: Int, columns: Int) {
-        draw(1, 1, pickingSlack ? "ADD SLACK CONVERSATION" : "SLACK CONVERSATIONS", width: columns - 2, emphasis: 1)
-        if pickingSlack {
-            let capacity = max(1, rows - 8), first = max(0, slackIndex - capacity + 1)
-            for (offset, index) in slackIndices.dropFirst(first).prefix(capacity).enumerated() {
-                let item = slackDiscovery[index]
-                let configured = slackSources.contains { $0.workspaceID == item.connection.workspaceID && $0.channelID == item.conversation.id }
-                draw(3 + offset, 1, "\(first + offset == slackIndex ? ">" : " ") \(item.connection.workspaceName) / \(item.conversation.name)\(configured ? " · configured" : "")", width: columns - 2, emphasis: first + offset == slackIndex ? 2 : 0)
+    private func drawHomeLists(width: Int, bottom: Int) {
+        let body = bottom - 4 + 1
+        let attentionHeight = attention.isEmpty ? 4 : min(max(5, body / 2), body - 5)
+        let workTop = 4 + attentionHeight + 1
+        navigation.listCapacities[.attention] = max(1, (attentionHeight - 1) / 2)
+        navigation.listCapacities[.work] = max(1, (bottom - workTop) / 2)
+        put(4, 1, "\(navigation.focus == .attention ? "> " : "")NEEDS YOU [\(attention.count)]", width - 1, attention.isEmpty ? 3 : 4)
+        if attention.isEmpty { put(6, 2, "No decisions waiting", width - 3, 3) }
+        else {
+            let capacity = max(1, (attentionHeight - 1) / 2), selected = attention.firstIndex { $0.id == selectedAttentionID } ?? 0
+            let first = max(0, selected - capacity + 1)
+            for (offset, item) in attention.dropFirst(first).prefix(capacity).enumerated() {
+                let y = 5 + offset * 2, selected = item.id == selectedAttentionID
+                put(y, 1, "\(selected ? ">" : " ") \(single(item.title))", width - 1, selected ? (navigation.focus == .attention ? 2 : 8) : 0)
+                put(y + 1, 3, item.label + " · " + single(item.subtitle), width - 3, item.isFailure ? 6 : 4)
             }
-            if slackIndices.isEmpty { draw(3, 1, slackDiscoveryJob == nil ? "No matching conversations. c clears the filter; r retries discovery." : "Discovering conversations…", width: columns - 2) }
-            return
         }
-        if slackSources.isEmpty {
-            let error = slackWorkspaces.compactMap(\.lastError).first
-            draw(3, 1, error.map { "Discovery error: " + $0 } ?? "Connected workspaces are monitored automatically. Discovering accessible conversations…", width: columns - 2)
-        }
-        draw(2, 1, "Automatic monitoring · \(slackWorkspaces.count) workspaces · \(slackSources.count) conversations", width: columns - 2)
-        let selected = slackSources.firstIndex(where: { $0.id == selectedSlackID }) ?? 0
-        let capacity = max(1, (rows - 8) / 5)
-        for (index, source) in slackSources.dropFirst(max(0, selected - capacity + 1)).prefix(capacity).enumerated() {
-            let y = 3 + index * 5
-            let success = source.lastSuccess.map { Date(timeIntervalSince1970: $0).formatted() } ?? "not yet"
-            let next = !source.enabled ? "disabled" : source.nextPoll == 0 ? "due now" : Date(timeIntervalSince1970: source.nextPoll).formatted()
-            draw(y, 1, "\(source.id == selectedSlackID ? ">" : " ") \(source.workspaceName) / \(source.channelName) · \(source.enabled ? "enabled" : "disabled") · every \(source.intervalSeconds)s", width: columns - 2, emphasis: source.id == selectedSlackID ? 2 : 0)
-            draw(y + 1, 3, "Project: " + (source.repository.isEmpty ? "Automatic task matching; questions for unclear projects" : source.repository), width: columns - 4)
-            draw(y + 2, 3, "Last success: \(success) · next: \(next)", width: columns - 4)
-            draw(y + 3, 3, source.lastError.map { "Error: " + $0 } ?? "New messages, edits, and thread replies enter triage; initial history is baselined.", width: columns - 4)
+        put(workTop - 1, 1, String(repeating: "─", count: width - 1), width - 1, 7)
+        put(workTop, 1, "\(navigation.focus == .work ? "> " : "")WORK [\(tasks.count)]", width - 1, navigation.focus == .work ? 1 : 3)
+        if tasks.isEmpty { put(workTop + 2, 2, "n creates a new task", width - 3, 3); return }
+        let capacity = max(1, (bottom - workTop) / 2), selected = tasks.firstIndex { $0.id == selectedTaskID } ?? 0, first = max(0, selected - capacity + 1)
+        for (offset, task) in tasks.dropFirst(first).prefix(capacity).enumerated() {
+            let y = workTop + 1 + offset * 2, selected = task.id == selectedTaskID
+            put(y, 1, "\(selected ? ">" : " ") \(single(task.goal))", width - 1, selected ? (navigation.focus == .work ? 2 : 8) : 0)
+            let reply = actions.contains { $0.taskID == task.id && $0.status == "open" }
+            put(y + 1, 3, reply ? "Reply ready · Needs you" : taskStatus(task.status), width - 3, reply || task.status == .waitingForUser ? 4 : task.status == .failed ? 6 : task.status == .running ? 5 : 3)
         }
     }
-
-    private func drawSources(rows: Int, columns: Int, left: Int, right: Int, width: Int) {
-        draw(1, 1, "INCOMING (\(sources.count))", width: left, emphasis: 1)
-        let selected = sources.firstIndex(where: { $0.id == selectedSourceID }) ?? 0
-        let available = max(1, (rows - 9) / 2)
-        let first = max(0, selected - available + 1)
-        for (offset, event) in sources.dropFirst(first).prefix(available).enumerated() {
-            let focused = event.id == selectedSourceID
-            let y = 3 + offset * 2
-            draw(y, 1, "\(focused ? ">" : " ") #\(event.id) \(event.body.replacingOccurrences(of: "\n", with: " "))", width: left - 1, emphasis: focused ? 2 : 0)
-            draw(y + 1, 3, event.disposition.rawValue, width: left - 3)
+    private func drawSecondaryList(width: Int, bottom: Int) {
+        let entries: [(String, String, String, Bool)]
+        let selected: String?
+        let title: String
+        switch page {
+        case .activity:
+            title = "INCOMING ACTIVITY"
+            selected = selectedSourceID.map(String.init)
+            entries = sources.map { (String($0.id), "#\($0.id) " + single($0.body), $0.integration.capitalized + " · " + sourceStatus($0.disposition), $0.disposition == .failed || $0.disposition == .waitingForUser) }
+        case .connections:
+            title = "SOURCE HEALTH"; selected = selectedConnectionID
+            entries = connections.map { ($0.id, $0.title, $0.subtitle, $0.hasError) }
+        case .repositories:
+            title = "ADD GITHUB REPOSITORY"; selected = String(repositoryIndex)
+            entries = repositoryIndices.enumerated().map { offset, index in
+                let candidate = discovery!.repositories[index]
+                return (String(offset), candidate.slug, discovery?.current?.slug.lowercased() == candidate.slug.lowercased() ? "Current checkout" : "Available repository", false)
+            }
+        case .home: return
         }
-        guard let event = sources.first(where: { $0.id == selectedSourceID }) else {
-            draw(3, right, "Press s to inject a source message.", width: width)
-            draw(5, right, "The real master judges relevance across this repo's tasks.", width: width)
-            return
+        navigation.listCapacities[.work] = max(1, (bottom - 4) / 2)
+        put(4, 1, title, width - 1, navigation.focus == .work ? 1 : 3)
+        if entries.isEmpty { put(6, 2, discoveryJob != nil && page == .repositories ? "Discovering…" : "Nothing here yet", width - 3, 3); return }
+        let capacity = max(1, (bottom - 4) / 2), index = entries.firstIndex { $0.0 == selected } ?? 0, first = max(0, index - capacity + 1)
+        for (offset, entry) in entries.dropFirst(first).prefix(capacity).enumerated() {
+            let y = 5 + offset * 2, chosen = entry.0 == selected
+            put(y, 1, "\(chosen ? ">" : " ") \(single(entry.1))", width - 1, chosen ? (navigation.focus == .work ? 2 : 8) : 0)
+            put(y + 1, 3, single(entry.2), width - 3, entry.3 ? 6 : 3)
         }
-        draw(2, right, "Source #\(event.id) · \(event.integration) · \(event.disposition.rawValue)", width: width, emphasis: 1)
-        let runtime = event.targetWorkerKind.map { "Child runtime: \($0.rawValue.uppercased())" } ?? "New work uses \(event.workerKind.rawValue.uppercased())"
-        draw(3, right, runtime + " · master uses Codex", width: width)
-        var lines = ["SOURCE MESSAGE"] + TerminalText.wrap(event.body, width: width) + [""]
-        if let context = event.slackContext {
-            lines += ["SLACK CONTEXT"] + TerminalText.wrap("\(context.workspaceName) / #\(context.channelName) · \(context.precedingMessages.count) preceding messages · \(context.threadMessages.count) thread messages · \(context.projectHistory.count) prior project decisions", width: width)
-            if let topic = context.topic, !topic.isEmpty { lines += TerminalText.wrap("Topic: " + topic, width: width) }
-            if let purpose = context.purpose, !purpose.isEmpty { lines += TerminalText.wrap("Purpose: " + purpose, width: width) }
-            lines += [""]
-        }
-        if let reason = event.reason { lines += ["DECISION"] + TerminalText.wrap(reason, width: width) + [""] }
-        if let id = event.taskID {
-            let goal = tasks.first(where: { $0.id == id })?.goal ?? id
-            lines += TerminalText.wrap("CHILD: \(goal)", width: width)
-            if let delivered = event.messageDelivered { lines += [delivered ? "MESSAGE ACCEPTED by child" : "MESSAGE QUEUED for child"] }
-            lines += ["Enter opens the child task.", ""]
-        }
-        if let error = event.lastError { lines += ["TRIAGE ERROR"] + TerminalText.wrap(error, width: width) + [""] }
-        if let answer = event.clarification { lines += ["YOUR CLARIFICATION"] + TerminalText.wrap(answer, width: width) + [""] }
-        if let question = event.question { lines += ["MASTER QUESTION — press a to answer"] + TerminalText.wrap(question, width: width) }
-        let end = max(0, lines.count - scroll)
-        let start = max(0, end - (rows - 11))
-        for (offset, line) in lines[start..<end].enumerated() { draw(5 + offset, right, line, width: width) }
     }
-
     private func drawFooter(rows: Int, columns: Int) {
-        draw(rows - 5, 0, String(repeating: "─", count: columns), width: columns)
         if let composer {
-            draw(rows - 4, 1, "\(composer.title) · Enter sends · Ctrl-N newline · Esc cancels", width: columns - 2, emphasis: 1)
-            let lines = TerminalText.wrap(String(decoding: input, as: UTF8.self) + "▏", width: columns - 2)
-            for (offset, line) in lines.suffix(2).enumerated() { draw(rows - 3 + offset, 1, line, width: columns - 2) }
+            put(rows - 8, 1, String(repeating: "─", count: columns - 2), columns - 2, 7)
+            put(rows - 7, 1, composer.title + " · Enter submits · Esc cancels", columns - 2, 4)
+            let lines = TerminalText.wrap(String(decoding: input, as: UTF8.self) + "▏", width: columns - 3)
+            for (offset, line) in lines.suffix(5).enumerated() { put(rows - 6 + offset, 1, line, columns - 2) }
+            put(rows - 1, 1, notice.hasPrefix("Error:") ? notice : "Ctrl-N newline · Ctrl-U clear input · Ctrl-W delete word · Enter submit · Esc cancel", columns - 2, notice.hasPrefix("Error:") ? 6 : 3)
         } else {
-            draw(rows - 4, 1, notice, width: columns - 2)
-            if showingActions {
-                draw(rows - 3, 1, "c copy reply · d mark done · x dismiss · Enter child · e source · ↑↓ select", width: columns - 2)
-                draw(rows - 2, 1, "v tasks · PgUp/Dn evidence/reply · q detach · Nothing is sent automatically", width: columns - 2)
-            } else if showingSlack {
-                draw(rows - 3, 1, pickingSlack ? "↑↓ select · Enter add · / filter · c clear · r refresh · Esc back" : "p pause/resume conversation · i interval · ↑↓ select (discovery is automatic)", width: columns - 2)
-                draw(rows - 2, 1, "l tasks · g GitHub · e incoming · q detach (polling continues)", width: columns - 2)
-            } else if showingGitHub && pickingGitHub {
-                draw(rows - 3, 1, "↑↓ select · Enter add (60s default) · / filter · c clear · r refresh · Esc back", width: columns - 2)
-                draw(rows - 2, 1, "Current checkout is inferred from origin; other repos need a local path · q detach", width: columns - 2)
-            } else if showingGitHub {
-                draw(rows - 3, 1, "n discover/add · p enable/disable · i interval · ↑↓ select", width: columns - 2)
-                draw(rows - 2, 1, "l Slack · g tasks · e incoming · q detach (polling continues)", width: columns - 2)
-            } else if showingSources {
-                draw(rows - 3, 1, "s inject source · a clarify · Enter open child · i investigate · r retry · u unignore · x ignore", width: columns - 2)
-                draw(rows - 2, 1, "v actions · l Slack · g GitHub · e tasks · ↑↓ select · PgUp/Dn scroll · Tab new-worker runtime · q detach", width: columns - 2)
-            } else {
-                draw(rows - 3, 1, "n new · m msg · a answer · p pause · t terminal · d remove · s source", width: columns - 2)
-                draw(rows - 2, 1, "v actions · l Slack · g GitHub · e incoming · r retry · x cancel · Tab runtime · ↑↓ select · PgUp/Dn · q quit", width: columns - 2)
-            }
+            put(rows - 3, 1, String(repeating: "─", count: columns - 2), columns - 2, 7)
+            put(rows - 2, 1, notice, columns - 2, notice.hasPrefix("Error:") ? 6 : 3)
+            put(rows - 1, 1, "j/k move · h/l panes · Ctrl-W h/j/k/l · Ctrl-U/D scroll · gg/G · 1 Home  2 Activity  3 Connections · ? help · q detach", columns - 2, 3)
         }
     }
-
-    private func draw(_ row: Int, _ column: Int, _ text: String, width: Int, emphasis: Int32 = 0) {
-        tm_terminal_draw(Int32(row), Int32(column), TerminalText.clean(text), Int32(width), emphasis)
+    private func put(_ row: Int, _ column: Int, _ text: String, _ width: Int, _ style: Int32 = 0) {
+        tm_terminal_draw(Int32(row), Int32(column), single(text), Int32(max(0, width)), style)
     }
 }

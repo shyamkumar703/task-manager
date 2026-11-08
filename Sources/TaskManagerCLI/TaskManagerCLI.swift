@@ -292,7 +292,8 @@ struct TaskManagerCLI {
       proposals                             Inspect exact action proposals
       decide PROPOSAL_ID approve|reject     Record a decision; never publishes
 
-    TUI tasks use real Codex workers by default; Tab selects mock mode.
+    TUI: Home surfaces questions/replies in Needs you. 1/2/3 switch views; hjkl and Ctrl-W navigate panes.
+    New manual tasks use Codex by default; M selects mock mode. Tab cycles panes.
     q detaches the TUI while workers continue. Workers do not publish changes.
     A task terminal allows you to run git commit/push manually.
     State defaults to ~/Library/Application Support/AutonomousTaskManager.

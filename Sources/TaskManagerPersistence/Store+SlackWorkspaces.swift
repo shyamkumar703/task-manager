@@ -39,6 +39,10 @@ extension Store {
             try log(taskID: nil, kind: "slack.discovered", detail: "\(workspaceID): monitoring \(conversations.count) discovered conversations")
         }
     }
+    public func retrySlackDiscovery(_ id: String) throws {
+        try db.execute("UPDATE slack_workspaces SET next_discovery = 0 WHERE id = ?", [id])
+        guard db.changes == 1 else { throw ManagerError.notFound("Unknown Slack workspace") }
+    }
     public func failSlackDiscovery(_ id: String, error: String, retryAfter: Double? = nil, now: Date = Date()) throws {
         try db.transaction {
             guard let workspace = try slackWorkspaces().first(where: { $0.id == id }) else { return }

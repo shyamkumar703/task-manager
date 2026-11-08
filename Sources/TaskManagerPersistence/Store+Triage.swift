@@ -24,6 +24,10 @@ extension Store {
         return try db.query(sourceQuery + filter + " ORDER BY e.id DESC LIMIT ?", (scope.map { [$0] } ?? []) + [String(limit)]).map(decodeSource)
     }
 
+    public func sourcesNeedingAttention() throws -> [IncomingSource] {
+        try db.query(sourceQuery + " WHERE e.disposition IN ('waitingForUser','failed') ORDER BY e.id").map(decodeSource)
+    }
+
     public func source(_ id: Int64) throws -> IncomingSource {
         guard let row = try db.query(sourceQuery + " WHERE e.id = ?", [String(id)]).first else { throw ManagerError.notFound("Unknown scoped source event: \(id)") }
         return try decodeSource(row)
@@ -202,11 +206,11 @@ extension Store {
         }
     }
 
-    public func answerSource(eventID: Int64, text: String, expectedAttempt: Int? = nil) throws {
+    public func answerSource(eventID: Int64, text: String, expectedAttempt: Int? = nil, expectedQuestion: String? = nil) throws {
         try requireText(text, name: "Clarification")
         try db.transaction {
             let event = try source(eventID)
-            guard event.disposition == .waitingForUser, expectedAttempt == nil || expectedAttempt == event.attempts else { throw ManagerError.conflict("This source question has already changed or been answered") }
+            guard event.disposition == .waitingForUser, expectedAttempt == nil || expectedAttempt == event.attempts, expectedQuestion == nil || expectedQuestion == event.question else { throw ManagerError.conflict("This source question has already changed or been answered") }
             let proposedPath = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if event.repository.isEmpty, proposedPath.hasPrefix("/"), let repository = try? sourceRepository(proposedPath) {
                 try registerProject(repository: repository)

@@ -35,26 +35,34 @@ From this repository, launch with the todo-list checkout as the repository for n
   /Users/shyamkumar/Developer/todo_list_task_manager_test
 ```
 
-The TUI starts or attaches to a coordinator for that state directory. It opens in **CODEX** mode: new tasks execute with real Codex workers in isolated worktrees. Press Tab to explicitly select **MOCK** for simulated progress, follow-ups, and questions without model calls or file changes. Switching modes affects new tasks only; existing mock tasks remain mock tasks.
+The TUI starts or attaches to a coordinator for that state directory. It opens in **CODEX** mode: new tasks execute with real Codex workers in isolated worktrees. Press **`M`** to explicitly select **MOCK** for simulated progress, follow-ups, and questions without model calls or file changes. Switching modes affects new tasks only; existing mock tasks remain mock tasks.
 
-| Key | Action |
+The home dashboard places **Needs you** above the work list, with the selected item's details on the right. Source clarifications (even those with no task yet), child questions, suggested replies, pending approval decisions, failed children/reviews, and persistent/authentication connection failures all appear here automatically. Questions are prioritized; running/queued work stays ahead of completed tasks. New items update the queue and banner without stealing focus from what you are reading. Cancelled/archived child questions and already resolved replies are excluded. A pending reply remains reviewable even if its child is archived.
+
+| Key | Navigation / action |
 | --- | --- |
-| `n` | Enter a goal and create a task |
-| `m` | Send a follow-up to the selected child |
-| `a` | Answer the selected child's pending question |
-| `p` | Pause or resume the selected child |
-| `r` | Retry/continue a completed, failed, or paused task |
-| `x` | Cancel the selected task, preserving its local work |
-| `t` | Open an interactive shell in the selected child's worktree |
-| `d` | Remove the selected task from the list, retaining its history |
-| `s` | Inject a mock source message for real master triage |
-| `e` | Switch between tasks and incoming source events |
-| `Tab` | Switch new tasks between MOCK and CODEX |
-| Up/Down or `j`/`k` | Select a task |
-| PageUp/PageDown | Scroll its conversation |
-| `q` or Ctrl-C | Detach the UI; workers continue |
+| `1` / `2` / `3` | Home / incoming activity / connection health |
+| `j` / `k` | Move through the focused list, or scroll the focused detail pane |
+| `h` / `l`, `Ctrl-W h/l` | Focus the left list / right detail pane |
+| `Ctrl-W j/k` | Move down/up between Needs you and Work on Home |
+| `Tab`, `Ctrl-W w` | Cycle panes |
+| `Ctrl-D/U`, `Ctrl-F/B` | Scroll the focused list or detail by half / full screens |
+| `gg` / `G` | First/last list item, or top/latest detail |
+| Enter / `a` on a question | Answer it directly from Needs you |
+| `c` / `d` / `x` on a reply | Copy / mark replied / dismiss; never sends automatically |
+| `a` / `x` on a proposal | Record approval / rejection; no automatic publication |
+| `o` in Needs you | Inspect the linked child |
+| `n` | New task; on Connections, add a GitHub repository |
+| `M` | Switch new manual tasks/simulated sources between CODEX and MOCK |
+| `m` / `p` / `t` on work | Message / pause or resume / worktree terminal |
+| `r` / `d` / `x` on work | Retry or continue / remove / cancel, when available |
+| `s` | Simulate an incoming source message on Home or Activity |
+| `?` | Full keyboard guide |
+| `q`, Ctrl-C | Detach; workers and polling continue |
 
-In an input form, Enter sends, Ctrl-N inserts a newline, and Esc cancels. Resize is handled by ncurses; the minimum layout is 76 columns by 16 rows. Transcript controls are stripped before rendering.
+The selected item's available actions are shown above its details. Navigation keys never approve, dismiss, or send anything. Arrow keys and PageUp/PageDown remain optional alternatives; Vim motions do not require them. The old `v` key remains a Home alias, but replies and questions no longer live behind a separate actions screen.
+
+In an input form, Enter submits, Ctrl-N inserts a newline, Ctrl-U clears input, Ctrl-W deletes the previous word, and Esc cancels. The original question remains visible while composing. Resize is handled by ncurses; the minimum layout is 80 columns by 22 rows. Muted cyan identifies headings, amber identifies decisions/questions, green indicates active/healthy state, and red identifies errors; body text stays neutral. `NO_COLOR` or terminals without color use bold/reverse-video fallbacks. Transcript controls are stripped before rendering.
 
 To start a **real child**, press `n` with CODEX shown in the header. Try this goal:
 
@@ -68,7 +76,7 @@ Press `t` to use that worktree directly. An active worker pauses and releases ow
 
 The shell exports `TASK_MANAGER_TASK_ID`, `TASK_MANAGER_WORKTREE`, and `TASK_MANAGER_CODEX_THREAD_ID`. Its durable manual-ownership reservation prevents a coordinator from restarting the worker while the shell is open, even if another UI queues it. After a crashed shell, close any remaining manual session before clearing the reservation with `release-terminal TASK_ID`.
 
-Press `d` to archive a task. Unlike cancellation, this removes it from the task list and attention count across restarts. Active work is paused; its database record, conversation, pending questions, branch, and worktree remain. Incoming feedback cannot reactivate an archived task. Use these CLI commands to inspect or restore it:
+Press `d` to archive a task. Unlike cancellation, this removes it from the work list across restarts. Child questions stop appearing in Needs you; outstanding reply actions can still be reviewed or dismissed. Active work is paused; its database record, conversation, pending questions, branch, and worktree remain. Incoming feedback cannot reactivate an archived task. Use these CLI commands to inspect or restore it:
 
 ```sh
 .build/debug/task-manager --state-dir .state/dev list --all
@@ -103,7 +111,7 @@ The master can route the update to an existing child, create a distinct task, ig
 
 The incoming-events view shows the source text, decision, reason, destination, actual child runtime, and QUEUED/ACCEPTED delivery status. Press:
 
-- **`e`** to inspect incoming events or return to tasks.
+- **`2`** to inspect incoming activity, or **`1`** to return Home.
 - **Enter** on a routed/created event to open its child.
 - **`u`** on an ignored event to send the original message back through master triage, including initial baseline history. Existing user clarifications are preserved; reconsideration does not force a particular routing decision.
 - **`a`** on a waiting event to answer the master's question; the original message and clarification are reconsidered together.
@@ -205,9 +213,9 @@ Each poll re-fetches the complete PR feedback snapshot and uses revision hashes 
 
 ### Automatic repository polling
 
-Open the TUI and press **`g`**, then **`n`** to discover repositories using your existing `gh` authentication. Setup detects your GitHub login, reads the current checkout’s `origin`, and places that repository first in the list. Use **↑↓** to select, **`/`** to filter by repository name (**`c`** clears), and **Enter** to enable polling. The current checkout needs no additional input; other repositories ask only for a local checkout path whose origin matches the selection. Polling defaults to 60 seconds. No new login is needed if `gh` is already authenticated; authentication errors point to `gh auth status`.
+Open the TUI and press **`3`** (Connections), then **`n`** to discover repositories using your existing `gh` authentication. Setup detects your GitHub login, reads the current checkout’s `origin`, and places that repository first in the list. Use **↑↓** to select, **`/`** to filter by repository name (**`c`** clears), and **Enter** to enable polling. The current checkout needs no additional input; other repositories ask only for a local checkout path whose origin matches the selection. Polling defaults to 60 seconds. No new login is needed if `gh` is already authenticated; authentication errors point to `gh auth status`.
 
-Repeat to add other accessible repositories. Archived/disabled repositories are omitted from the discovered account list. Press **`Esc`** to leave the picker, **`r`** to refresh, **`p`** to enable/disable a configured repository, or **`i`** to change its interval (10–86400 seconds). Configuration and health persist in SQLite. The repository view shows last success, next poll, and errors; **`e`** opens incoming events and **`g`** returns to tasks.
+Repeat to add other accessible repositories. Archived/disabled repositories are omitted from the discovered account list. Press **`Esc`** to leave the picker, **`r`** to refresh, **`p`** to enable/disable a configured repository, or **`i`** to change its interval (10–86400 seconds). Configuration and health persist in SQLite. The Connections view shows last success, next poll, and errors; **`2`** opens incoming activity and **`1`** returns Home.
 
 The persistent coordinator discovers your open PRs in each enabled repository and reads their conversation comments, inline comments, and reviews. Polling continues after **`q`** detaches the TUI. Stopping the coordinator stops polling; restarting resumes using saved intervals, baselines, and event revisions. Network fetches run separately from child workers and master triage, with at most two repository polls in flight. Failures in one repository do not stop the others. Failed repository polls preserve successful per-PR commits and retry with saved backoff.
 
@@ -237,7 +245,7 @@ Run `task-manager --state-dir PATH slack-connect` to open a native macOS secure 
 
 Connected Slack workspaces are monitored automatically by the persistent coordinator. No channel selection or project-path setup is required. It discovers every accessible, non-archived conversation returned by Slack—public channels (including channels you have not joined), private channels, DMs, and group DMs—and repeats discovery every minute to enroll newly available conversations. Access is limited by your authorized Slack user token and workspace policies. Start the TUI or run `coordinator-start`; a newly saved `slack-connect` connection is picked up automatically while the coordinator is running.
 
-Press **`l`** to inspect discovery and polling health. Polling defaults to 60 seconds per conversation. **`p`** pauses/resumes a conversation and **`i`** changes its interval; these overrides survive rediscovery and restarts. These controls are optional. **`e`** opens incoming messages and routing decisions. Polling continues after **`q`** detaches the TUI.
+Press **`3`** (Connections) to inspect discovery and polling health. Polling defaults to 60 seconds per conversation. **`p`** pauses/resumes a conversation and **`i`** changes its interval; these overrides survive rediscovery and restarts. These controls are optional. **`2`** opens incoming messages and routing decisions. Polling continues after **`q`** detaches the TUI.
 
 Automatically discovered conversations are not assigned to the TUI's current checkout. The master compares incoming messages with tasks across known local projects and follows learned thread associations. Relevant updates reach existing children, and instruction/approach conflicts become questions. For new work, it may choose a known project when clearly identified; unclear projects become user questions. You can answer with an absolute checkout path to register a project. Merely opening a TUI in a checkout does not authorize assigning all Slack messages to that checkout. Existing manually configured project bindings remain supported.
 
@@ -265,9 +273,9 @@ Information-seeking source questions (for example, “what commands are availabl
 
 An explorer receives a detached snapshot of the locally available default branch, with its reference and exact commit saved in SQLite. It resolves the remote default-branch name when available, preferring the corresponding local branch; otherwise it looks for local/cached `main` or `master`. It never falls back to the currently checked-out feature branch. The snapshot is pinned across retries. There is no automatic fetch: findings describe that recorded local snapshot, not necessarily the newest remote, deployed or released version. Explorers use the app-server’s read-only sandbox, with apps and web search disabled, and instructions to inspect without implementing or publishing. See the [official app-server documentation](https://learn.chatgpt.com/docs/app-server).
 
-When an explorer finishes, its findings and suggested reply become a durable **user action** in the same transaction as completion. The TUI header shows an action count and the child shows “reply ready.” Press **`v`** for user actions, **`c`** to copy the suggested reply, **`Enter`** to inspect the child, or **`e`** for the source. Review and paste the response into the source thread manually; **`d`** marks it done and **`x`** dismisses it. Neither operation sends anything. Evidence and the inspected branch/commit are visible above the suggested reply (PgUp/PgDn scroll). Actions survive TUI detachment and coordinator restarts.
+When an explorer finishes, its findings and suggested reply become a durable **user action** in the same transaction as completion. The reply appears immediately in **Home → Needs you**, alongside clarification questions and approvals. Select it to see the suggested response first, the original request and source destination, and the inspected branch/commit evidence below. Use **`c`** to copy, **`d`** to mark replied, **`x`** to dismiss, **`e`** to inspect the original source, or **`o`** to inspect the child. Nothing is sent automatically. Use **`l`** to focus details and **`j/k`**, **`Ctrl-U/D`**, or **`gg/G`** to read longer evidence. Actions survive detachment and restarts.
 
-For a question that was previously routed to the wrong feature worker, select the source in **`e`** and press **`i`** to request an independent investigation. Existing feature messages and decisions remain in history; repeated requests reuse the already-created exploration. CLI equivalents:
+For a question that was previously routed to the wrong feature worker, select the source in **`2`** (Activity) and press **`i`** to request an independent investigation. Existing feature messages and decisions remain in history; repeated requests reuse the already-created exploration. CLI equivalents:
 
 ```sh
 .build/debug/task-manager --state-dir .state/dev source-investigate EVENT_ID
@@ -276,7 +284,7 @@ For a question that was previously routed to the wrong feature worker, select th
 .build/debug/task-manager --state-dir .state/dev action-dismiss ACTION_ID
 ```
 
-Relaunch the TUI after this upgrade to use the new actions view. The coordinator can be updated separately with `coordinator-start`.
+Relaunch the TUI after this upgrade to use the dashboard with Needs you. The coordinator can be updated separately with `coordinator-start`.
 
 ### Slack context for project routing
 
