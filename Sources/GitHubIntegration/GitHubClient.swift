@@ -36,63 +36,36 @@ public protocol GitHubHTTPTransport: Sendable {
     func get(_ request: URLRequest) async throws -> HTTPResponse
 }
 
-private final class NoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
-    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
-        completionHandler(nil)
-    }
-}
-
-public struct GitHubURLSessionTransport: GitHubHTTPTransport {
-    public init() {}
-    public func get(_ request: URLRequest) async throws -> HTTPResponse {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 30
-        configuration.timeoutIntervalForResource = 60
-        configuration.httpCookieStorage = nil
-        configuration.urlCredentialStorage = nil
-        let session = URLSession(configuration: configuration, delegate: NoRedirects(), delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
-        let (data, response) = try await session.data(for: request)
-        guard let response = response as? HTTPURLResponse else { throw ManagerError.invalid("GitHub returned a non-HTTP response") }
-        var headers: [String: String] = [:]
-        for (key, value) in response.allHeaderFields { headers[String(describing: key).lowercased()] = String(describing: value) }
-        return HTTPResponse(data: data, status: response.statusCode, headers: headers)
-    }
-}
-
 public enum GitHubError: Error, Sendable, CustomStringConvertible {
     case http(status: Int, retryAfter: String?)
     case pageLimit
+    case cli(exitCode: Int32)
 
     public var description: String {
         switch self {
         case .http(let status, let retry): "GitHub returned HTTP \(status)" + (retry.map { "; retry after/reset: \($0)" } ?? "")
+        case .cli(let code): "gh exited with status \(code). Check gh auth status and network connectivity."
         case .pageLimit: "GitHub pagination limit reached; no partial batch should be committed"
         }
     }
 }
 
-public struct GitHubPullRequest: Decodable, Sendable {
-    public struct User: Decodable, Sendable { public let login: String }
-    public struct Head: Decodable, Sendable { public let sha: String }
+public struct GitHubPullRequest: Codable, Sendable {
+    public struct User: Codable, Sendable { public let login: String }
+    public struct Head: Codable, Sendable { public let sha: String }
     public let number: Int
     public let title: String
     public let user: User
     public let head: Head
 }
 
-/// Read-only REST adapter. Tokens never enter SourceEvent payloads or logs.
+/// Read-only adapter using gh authentication. Credentials never enter event payloads or logs.
 public struct GitHubClient: Sendable {
-    private let token: String?
     private let transport: any GitHubHTTPTransport
     private let maxPages: Int
 
-    public init(token: String? = nil, transport: any GitHubHTTPTransport = GitHubURLSessionTransport(), maxPages: Int = 100) throws {
+    public init(transport: any GitHubHTTPTransport = GitHubCLITransport(), maxPages: Int = 100) throws {
         guard maxPages > 0 else { throw ManagerError.invalid("maxPages must be positive") }
-        if let token {
-            guard !token.isEmpty, !token.contains("\r"), !token.contains("\n") else { throw ManagerError.invalid("Invalid GitHub token") }
-        }
-        self.token = token
         self.transport = transport
         self.maxPages = maxPages
     }
@@ -141,7 +114,6 @@ public struct GitHubClient: Sendable {
             request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
             request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
             request.setValue("autonomous-task-manager/0.1.0", forHTTPHeaderField: "User-Agent")
-            if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
             let response = try await transport.get(request)
             guard response.status == 200 else {
                 throw GitHubError.http(status: response.status, retryAfter: response.headers["retry-after"] ?? response.headers["x-ratelimit-reset"])

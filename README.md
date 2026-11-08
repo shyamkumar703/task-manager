@@ -55,13 +55,19 @@ Status changes here are manual state transitions; setting a task to `running` do
 
 ## GitHub reads
 
-The adapter supports GitHub.com. To import all current discussion, inline comments, and submitted review bodies for an explicitly selected PR:
+The adapter uses GitHub CLI (`gh`) for GitHub.com reads and authentication. Install `gh` and authenticate with `gh auth login` if you have not already done so. List your open PRs with:
+
+```sh
+.build/debug/task-manager --state-dir .state github-prs OWNER/REPO YOUR_LOGIN
+```
+
+To import all current discussion, inline comments, and submitted review bodies for an explicitly selected PR:
 
 ```sh
 .build/debug/task-manager --state-dir .state github-import OWNER/REPO PR_NUMBER
 ```
 
-It uses `GITHUB_TOKEN` from the environment if present, otherwise unauthenticated reads. Supply credentials through your existing secret-management mechanism. Tokens and HTTP response bodies are not written to the journal. Requests are GET-only, redirects are refused, and pagination is bounded. A failed batch is not partially ingested. Rate-limit errors report retry metadata; automatic retry/backoff is not implemented yet.
+Authentication stays in `gh`, which uses your saved login or its supported token environment variables (`GH_TOKEN`/`GITHUB_TOKEN`). The application invokes `gh api --hostname github.com --method GET --include` directly, without a shell or credentials in command arguments. It reads pagination headers and fetches bounded pages rather than delegating unlimited pagination to `gh`. A failed batch is not partially ingested. Rate-limit errors report retry metadata; automatic retry/backoff is not implemented yet. Process timeout/cancellation and bounded stdout prevent hung or oversized responses from stalling the caller; stderr is drained without being persisted.
 
 Repeated imports deduplicate identical revisions. Established task source associations route automatically. Unknown associations remain pending for future master triage. This manual command imports history; automatic first-run baselining and continuous polling are still to come.
 

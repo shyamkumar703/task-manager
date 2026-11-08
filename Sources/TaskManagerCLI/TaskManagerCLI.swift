@@ -48,7 +48,7 @@ struct TaskManagerCLI {
             }
             return
         }
-        let known = ["init", "add", "list", "show", "status", "resume", "message", "ask", "answer", "questions", "journal", "ingest", "route", "propose-comment", "proposals", "decide", "github-import"]
+        let known = ["init", "add", "list", "show", "status", "resume", "message", "ask", "answer", "questions", "journal", "ingest", "route", "propose-comment", "proposals", "decide", "github-import", "github-prs"]
         guard known.contains(command) else { throw ManagerError.invalid("Unknown command: \(command). Run task-manager help.") }
         try FileManager.default.createDirectory(atPath: statePath, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let store = try Store(path: URL(fileURLWithPath: statePath).appendingPathComponent("state.sqlite").path)
@@ -81,11 +81,16 @@ struct TaskManagerCLI {
             try count(1)
             let events = try JSONDecoder().decode([SourceEvent].self, from: Data(contentsOf: URL(fileURLWithPath: args[0])))
             print("Inserted \(try await store.ingest(events)) events")
+        case "github-prs":
+            try count(2)
+            let repository = try GitHubRepository(args[0])
+            let client = try GitHubClient()
+            try output(await client.openPullRequests(in: repository, author: args[1]))
         case "github-import":
             try count(2)
             guard let pr = Int(args[1]), pr > 0 else { throw ManagerError.invalid("PR number must be positive") }
             let repository = try GitHubRepository(args[0])
-            let client = try GitHubClient(token: ProcessInfo.processInfo.environment["GITHUB_TOKEN"])
+            let client = try GitHubClient()
             let events = try await client.feedback(in: repository, pr: pr)
             print("Inserted \(try await store.ingest(events)) events; routed \(try await store.routeKnownEvents())")
         case "route": try count(0); print("Routed \(try await store.routeKnownEvents()); pending \(try await store.pendingEventCount())")
@@ -123,7 +128,8 @@ struct TaskManagerCLI {
       questions                             List unanswered questions
       answer QUESTION_ID TEXT               Save answer and queue continuation
       ingest EVENTS_JSON                    Ingest normalized source events
-      github-import OWNER/REPO PR            Read and ingest a PR's feedback
+      github-import OWNER/REPO PR            Read PR feedback using gh authentication
+      github-prs OWNER/REPO AUTHOR           List author's open PRs using gh
       route                                 Route events with known associations
       journal                               Show persistent activity history
       propose-comment TASK_ID PR_URL HEAD TEXT

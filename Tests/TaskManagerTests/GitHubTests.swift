@@ -29,7 +29,7 @@ private func response(_ json: String, headers: [String: String] = [:]) -> HTTPRe
         response(#"[{"id":1,"body":"Handle empty strings","html_url":"https://github.com/o/r/pull/7#discussion_r1","path":"Sources/main.swift","line":12,"updated_at":"v1"}]"#),
         response(#"[{"id":1,"body":"Please add tests","html_url":"https://github.com/o/r/pull/7#pullrequestreview-1","submitted_at":"v1","state":"CHANGES_REQUESTED"},{"id":2,"body":"Draft","html_url":"x","state":"PENDING"},{"id":3,"body":"","html_url":"x"}]"#),
     ])
-    let client = try GitHubClient(token: "dummy-fixture-token", transport: transport)
+    let client = try GitHubClient(transport: transport)
     let repository = try GitHubRepository("o/r")
     let events = try await client.feedback(in: repository, pr: 7)
     #expect(events.count == 4)
@@ -40,7 +40,7 @@ private func response(_ json: String, headers: [String: String] = [:]) -> HTTPRe
     #expect(requests.count == 4)
     #expect(requests.allSatisfy { $0.httpMethod == "GET" && $0.url?.host == "api.github.com" })
     #expect(requests[1].url?.query?.contains("page=2") == true)
-    #expect(requests[0].value(forHTTPHeaderField: "Authorization") == "Bearer dummy-fixture-token")
+    #expect(requests[0].value(forHTTPHeaderField: "Authorization") == nil)
     let store = try Store(path: ":memory:")
     let task = try await store.createTask(goal: "Handle PR feedback", sourceKey: repository.associationKey(pr: 7))
     #expect(try await store.ingest(events) == 4)

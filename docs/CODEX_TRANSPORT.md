@@ -30,10 +30,6 @@ Important boundaries still to implement:
 
 The generic transport request API is an internal building block, not an authorization policy. Timing out a request abandons the local waiter; it does not prove the remote operation was cancelled. Future lifecycle code must reconcile side effects and interrupt turns explicitly.
 
-The live handshake could not be validated in this restricted development session. The installed server exits before accepting requests with:
+The live initialization handshake passed on 2026-11-07 after the user restarted this development session with full access. The server identified itself as `autonomous_task_manager/0.167.0`, platform `macos`, and reported the expected Codex home. Earlier restricted-session probes failed because the runtime could not initialize its SQLite state under that home; that development-session blocker is resolved.
 
-```text
-failed to initialize sqlite state runtime under /Users/shyamkumar/.codex
-```
-
-That directory is read-only in the session. The failure is separate from protocol fixture validation. No agent thread or model request was started. Autonomous workers remain disabled until the runtime and isolation milestone is verified.
+This verifies process startup and protocol initialization only. No agent thread or model request was started. Autonomous workers remain disabled pending lifecycle, recovery, and execution-policy implementation.

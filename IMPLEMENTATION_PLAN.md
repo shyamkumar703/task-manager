@@ -26,7 +26,7 @@ Integrate with the local `codex app-server` through a narrow JSON-RPC adapter ov
 
 The official [Codex App Server documentation](https://learn.chatgpt.com/docs/app-server) describes thread persistence/resume, turn execution, active-turn steering, and approval interactions. The adapter will encapsulate those capabilities; the application remains responsible for its own durable task state. Check the installed version before relying on particular protocol fields.
 
-Use a GitHub API client behind the integration interface, with existing local authentication or a narrowly scoped token stored outside the database. Start with polling, avoiding an inbound webhook service on the laptop.
+Use `gh` behind the GitHub integration interface, reusing its existing local authentication rather than implementing direct HTTP/token management. Invoke `gh api` with explicit host/method and parse its included response headers, retaining bounded pagination and normalized events in the adapter. Start with polling, avoiding an inbound webhook service on the laptop.
 
 ## Process architecture
 
