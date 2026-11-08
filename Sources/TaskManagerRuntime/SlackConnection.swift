@@ -81,6 +81,25 @@ public enum SlackConnection {
         return SlackConnectionInfo(workspaceID: workspace, workspaceName: name, userID: user)
     }
 
+    public static func connections(stateDirectory: String) throws -> [SlackConnectionInfo] {
+        let file = URL(fileURLWithPath: stateDirectory).appendingPathComponent("slack-connections.json")
+        guard FileManager.default.fileExists(atPath: file.path) else { return [] }
+        return try JSONDecoder().decode([SlackConnectionInfo].self, from: Data(contentsOf: file))
+    }
+
+    public static func token(workspaceID: String, userID: String) throws -> String {
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service, kSecAttrAccount as String: workspaceID + ":" + userID,
+            kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess, let data = result as? Data, let token = String(data: data, encoding: .utf8) else {
+            throw ManagerError.storage("Slack credential is unavailable in Keychain (status \(status)); reconnect with slack-connect")
+        }
+        try validateToken(token)
+        return token
+    }
+
     public static func connect(token: String, stateDirectory: String) async throws -> SlackConnectionInfo {
         try validateToken(token)
         var request = URLRequest(url: URL(string: "https://slack.com/api/auth.test")!)

@@ -231,4 +231,28 @@ Ignored source events can also be reconsidered with `task-manager --state-dir PA
 
 ### Slack authorization setup
 
-Run `task-manager --state-dir PATH slack-connect` to open a native macOS secure token dialog. Paste the Slack **User OAuth Token** (`xoxp-`); the command checks the authenticated workspace/user with Slack and saves the credential in macOS Keychain. Tokens are not accepted as command arguments or saved in SQLite, JSON, or logs. Only workspace/user metadata is written to `slack-connections.json` in the state directory. This command connects credentials only; Slack conversation discovery and message polling are not enabled yet.
+Run `task-manager --state-dir PATH slack-connect` to open a native macOS secure token dialog. Paste the Slack **User OAuth Token** (`xoxp-`); the command checks the authenticated workspace/user with Slack and saves the credential in macOS Keychain. Tokens are not accepted as command arguments or saved in SQLite, JSON, or logs. Only workspace/user metadata is written to `slack-connections.json` in the state directory. After connecting, use the TUI Slack view (`l`) to select conversations for automatic polling.
+
+### Automatic Slack polling
+
+Use the same state directory where you ran `slack-connect`. Restart the TUI after upgrading, press **`l`** for Slack, then **`n`** to discover your connected workspace’s channels and DMs. Use **↑↓** to select, **`/`** to filter (**`c`** clears), and **Enter** to add a conversation. Confirm its local project path (prefilled with the TUI checkout). Repeat for other conversations. Each conversation is bound to that project for task triage; conversations spanning projects should be configured with care.
+
+Polling defaults to 60 seconds. **`p`** enables/disables the selected conversation; **`i`** changes its interval. The Slack view shows last success, next poll, and errors. **`e`** opens incoming events, where routing decisions, questions, and ignore/unignore work as with GitHub. **`l`** returns to tasks. Polling continues after **`q`** detaches the TUI and resumes after coordinator restart.
+
+The first successful scan records existing history as ignored baseline entries with a reason. Subsequent human messages, edits, and thread replies enter normal master triage, including messages without an explicit mention. Bot messages and empty/system messages are skipped. Initial history can be reconsidered with **`u`**. Polling reads complete bounded conversation/thread snapshots, with up to 100 pages per endpoint and 200 threaded roots per conversation. This detects replies to old roots and edits without relying only on message creation timestamps. Revisions, checkpoint generations, events, and successful schedules commit atomically; incomplete snapshots leave the checkpoint unchanged. Large histories beyond those safety limits produce a visible error rather than being partially ingested. Message deletions and attachments without text are not processed in this version.
+
+Up to two workspaces can poll independently; each workspace has one conversation poll in flight. Failures back off, and HTTP 429 Retry-After delays all conversations in that workspace. Credentials stay in Keychain. The adapter only calls Slack read endpoints; it does not post messages or modify conversations.
+
+Slack needs the appropriate **User Token Scopes** for both listing and reading conversations: `channels:read`/`channels:history`, `groups:read`/`groups:history`, `im:read`/`im:history`, and `mpim:read`/`mpim:history`. If discovery succeeds but history returns `missing_scope`, verify the history scopes under User Token Scopes, reinstall the app to apply changes, then reconnect with `slack-connect`. Slack may report multiple scope options; the required scope depends on conversation type. DM labels fall back to user IDs because user-profile permissions are not required.
+
+CLI equivalents:
+
+```sh
+.build/debug/task-manager --state-dir .state/dev slack-conversations
+.build/debug/task-manager --state-dir .state/dev slack-watch WORKSPACE_ID CHANNEL_ID /absolute/project/path
+.build/debug/task-manager --state-dir .state/dev slack-sources
+.build/debug/task-manager --state-dir .state/dev slack-disable SOURCE_ID
+.build/debug/task-manager --state-dir .state/dev slack-enable SOURCE_ID
+```
+
+`slack-poll SOURCE_ID` performs one complete poll for diagnostics; the persistent coordinator performs automatic polling. Slack connection metadata (`slack-connections.json`) and source/checkpoint state (SQLite) must use the same state directory. Keychain entries must also remain available when restoring application state.

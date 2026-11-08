@@ -8,9 +8,12 @@ import TaskManagerRuntime
 @MainActor
 public final class TaskManagerTUI {
     private enum Composer {
-        case new, message(String), answer(String), source, sourceAnswer(Int64, Int), githubPath(String, String), githubInterval(String), githubFilter
+        case new, message(String), answer(String), source, sourceAnswer(Int64, Int), githubPath(String, String), githubInterval(String), githubFilter, slackProject(SlackDiscoveredConversation), slackInterval(String), slackFilter
         var title: String {
             switch self {
+            case .slackProject(let item): "Local project for " + item.conversation.name
+            case .slackInterval: "Slack poll interval in seconds (10...86400)"
+            case .slackFilter: "Filter Slack conversations"
             case .githubPath(let slug, _): "Local checkout path for " + slug
             case .githubFilter: "Filter repositories by name"
             case .githubInterval: "Poll interval in seconds (10...86400)"
@@ -33,6 +36,17 @@ public final class TaskManagerTUI {
     private var selectedSourceID: Int64?
     private var showingSources = false
     private var showingGitHub = false
+    private var showingSlack = false
+    private var slackSources: [SlackSource] = []
+    private var selectedSlackID: String?
+    private var pickingSlack = false
+    private var slackDiscovery: [SlackDiscoveredConversation] = []
+    private var slackDiscoveryJob: Task<Void, Never>?
+    private var slackIndex = 0
+    private var slackFilter = ""
+    private var slackIndices: [Int] {
+        slackDiscovery.indices.filter { slackFilter.isEmpty || (slackDiscovery[$0].connection.workspaceName + " " + slackDiscovery[$0].conversation.name).localizedCaseInsensitiveContains(slackFilter) }
+    }
     private var githubSources: [GitHubSource] = []
     private var selectedGitHubID: String?
     private var pickingGitHub = false
@@ -64,7 +78,7 @@ public final class TaskManagerTUI {
 
     public func run() async throws {
         guard tm_terminal_open() == 0 else { throw ManagerError.invalid("The TUI requires an interactive terminal (TTY)") }
-        defer { discoveryJob?.cancel(); tm_terminal_close() }
+        defer { discoveryJob?.cancel(); slackDiscoveryJob?.cancel(); tm_terminal_close() }
         let previous = signal(SIGTERM, SIG_IGN)
         let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         termination.setEventHandler { self.running = false }
@@ -93,6 +107,8 @@ public final class TaskManagerTUI {
     }
 
     private func reload() async throws {
+        slackSources = try await store.slackSources()
+        if !slackSources.contains(where: { $0.id == selectedSlackID }) { selectedSlackID = slackSources.first?.id }
         githubSources = try await store.gitHubSources()
         if !githubSources.contains(where: { $0.id == selectedGitHubID }) { selectedGitHubID = githubSources.first?.id }
         tasks = try await store.tasks()
@@ -115,6 +131,15 @@ public final class TaskManagerTUI {
                 let text = String(decoding: input, as: UTF8.self)
                 try requireText(text, name: "Input")
                 switch composer {
+                case .slackProject(let item):
+                    selectedSlackID = try await store.addSlackSource(workspaceID: item.connection.workspaceID, workspaceName: item.connection.workspaceName, userID: item.connection.userID, channelID: item.conversation.id, channelName: item.conversation.name, repository: text)
+                    pickingSlack = false
+                    notice = "Slack conversation enabled; first poll baselines history, then new messages enter triage"
+                case .slackInterval(let id):
+                    guard let seconds = Int(text) else { throw ManagerError.invalid("Interval must be seconds") }
+                    try await store.setSlackSourceInterval(id, seconds: seconds)
+                    notice = "Slack polling interval saved"
+                case .slackFilter: slackFilter = text; slackIndex = 0
                 case .githubFilter:
                     discoveryFilter = text; discoveredIndex = 0
                 case .githubPath(let slug, let login):
@@ -166,7 +191,47 @@ public final class TaskManagerTUI {
         if key == tm_key_down() || key == 106 { select(1); return }
         if key == tm_key_page_up() { scroll += max(1, Int(tm_terminal_rows()) - 12); return }
         if key == tm_key_page_down() { scroll = max(0, scroll - max(1, Int(tm_terminal_rows()) - 12)); return }
-        if key == 103 { showingGitHub.toggle(); showingSources = false; pickingGitHub = false; discoveryJob?.cancel(); scroll = 0; return }
+        if key == 108 {
+            showingSlack.toggle(); showingGitHub = false; showingSources = false
+            discoveryJob?.cancel(); pickingSlack = false; slackDiscoveryJob?.cancel(); scroll = 0
+            return
+        }
+        if key == 103 && showingSlack { showingSlack = false; showingGitHub = true; pickingSlack = false; slackDiscoveryJob?.cancel(); return }
+        if showingSlack {
+            if pickingSlack {
+                switch key {
+                case 113, 3: running = false
+                case 27: pickingSlack = false; slackDiscoveryJob?.cancel()
+                case 114: beginSlackDiscovery()
+                case 47: composer = .slackFilter; input = Data()
+                case 99: slackFilter = ""; slackIndex = 0
+                case 10, 13, 343:
+                    guard slackIndices.indices.contains(slackIndex) else { return }
+                    let item = slackDiscovery[slackIndices[slackIndex]]
+                    if let existing = slackSources.first(where: { $0.workspaceID == item.connection.workspaceID && $0.channelID == item.conversation.id }) {
+                        selectedSlackID = existing.id; pickingSlack = false
+                    } else { composer = .slackProject(item); input = Data(repository.utf8) }
+                default: break
+                }
+            } else {
+                switch key {
+                case 113, 3: running = false
+                case 110: beginSlackDiscovery()
+                case 112:
+                    if let source = slackSources.first(where: { $0.id == selectedSlackID }) {
+                        try await store.setSlackSourceEnabled(source.id, enabled: !source.enabled); try await reload()
+                    }
+                case 105:
+                    if let source = slackSources.first(where: { $0.id == selectedSlackID }) {
+                        composer = .slackInterval(source.id); input = Data(String(source.intervalSeconds).utf8)
+                    }
+                case 101: showingSlack = false; showingSources = true
+                default: break
+                }
+            }
+            return
+        }
+        if key == 103 { showingSlack = false; showingGitHub.toggle(); showingSources = false; pickingGitHub = false; discoveryJob?.cancel(); scroll = 0; return }
         if showingGitHub {
             if pickingGitHub {
                 switch key {
@@ -287,6 +352,23 @@ public final class TaskManagerTUI {
         }
     }
 
+    private func beginSlackDiscovery() {
+        guard slackDiscoveryJob == nil else { return }
+        pickingSlack = true; slackDiscovery = []; slackIndex = 0; slackFilter = ""
+        notice = "Discovering Slack conversations using the saved Keychain connection…"
+        slackDiscoveryJob = Task {
+            defer { slackDiscoveryJob = nil }
+            do {
+                let result = try await SlackDiscovery.discover(stateDirectory: stateDirectory)
+                try Task.checkCancellation()
+                slackDiscovery = result
+                notice = result.isEmpty ? "No conversations found. Connect with slack-connect and check user scopes." : "Select a conversation, then choose its local project"
+            } catch {
+                if !Task.isCancelled { notice = "Slack discovery failed: \(error). Press r to retry." }
+            }
+        }
+    }
+
     private func beginGitHubDiscovery() {
         guard discoveryJob == nil else { return }
         pickingGitHub = true; discovery = nil; discoveredIndex = 0; discoveryFilter = ""
@@ -305,6 +387,14 @@ public final class TaskManagerTUI {
     }
 
     private func select(_ delta: Int) {
+        if showingSlack {
+            if pickingSlack { if !slackIndices.isEmpty { slackIndex = min(slackIndices.count - 1, max(0, slackIndex + delta)) } }
+            else if !slackSources.isEmpty {
+                let index = slackSources.firstIndex(where: { $0.id == selectedSlackID }) ?? 0
+                selectedSlackID = slackSources[min(slackSources.count - 1, max(0, index + delta))].id
+            }
+            return
+        }
         if showingGitHub && pickingGitHub {
             guard !discoveryIndices.isEmpty else { return }
             discoveredIndex = min(discoveryIndices.count - 1, max(0, discoveredIndex + delta))
@@ -341,6 +431,12 @@ public final class TaskManagerTUI {
         let masterQuestions = sources.filter { $0.disposition == .waitingForUser }.count
         let incoming = sources.filter { [.pending, .triaging, .failed].contains($0.disposition) }.count
         draw(0, 0, " TASK MANAGER   new: \(kind.rawValue.uppercased())   coordinator: \(live ? "running" : "offline")   asks: \(questions.count + masterQuestions)   inbox: \(incoming) ", width: columns, emphasis: 2)
+        if showingSlack {
+            drawSlack(rows: rows, columns: columns)
+            drawFooter(rows: rows, columns: columns)
+            tm_terminal_refresh()
+            return
+        }
         if showingGitHub {
             if pickingGitHub {
                 draw(1, 1, "ADD GITHUB REPOSITORY · " + (discovery?.login ?? "detecting gh identity…"), width: columns - 2, emphasis: 1)
@@ -422,6 +518,32 @@ public final class TaskManagerTUI {
         tm_terminal_refresh()
     }
 
+    private func drawSlack(rows: Int, columns: Int) {
+        draw(1, 1, pickingSlack ? "ADD SLACK CONVERSATION" : "SLACK CONVERSATIONS", width: columns - 2, emphasis: 1)
+        if pickingSlack {
+            let capacity = max(1, rows - 8), first = max(0, slackIndex - capacity + 1)
+            for (offset, index) in slackIndices.dropFirst(first).prefix(capacity).enumerated() {
+                let item = slackDiscovery[index]
+                let configured = slackSources.contains { $0.workspaceID == item.connection.workspaceID && $0.channelID == item.conversation.id }
+                draw(3 + offset, 1, "\(first + offset == slackIndex ? ">" : " ") \(item.connection.workspaceName) / \(item.conversation.name)\(configured ? " · configured" : "")", width: columns - 2, emphasis: first + offset == slackIndex ? 2 : 0)
+            }
+            if slackIndices.isEmpty { draw(3, 1, slackDiscoveryJob == nil ? "No matching conversations. c clears the filter; r retries discovery." : "Discovering conversations…", width: columns - 2) }
+            return
+        }
+        if slackSources.isEmpty { draw(3, 1, "Press n to select channels or DMs from your connected Slack workspace.", width: columns - 2) }
+        let selected = slackSources.firstIndex(where: { $0.id == selectedSlackID }) ?? 0
+        let capacity = max(1, (rows - 8) / 5)
+        for (index, source) in slackSources.dropFirst(max(0, selected - capacity + 1)).prefix(capacity).enumerated() {
+            let y = 3 + index * 5
+            let success = source.lastSuccess.map { Date(timeIntervalSince1970: $0).formatted() } ?? "not yet"
+            let next = !source.enabled ? "disabled" : source.nextPoll == 0 ? "due now" : Date(timeIntervalSince1970: source.nextPoll).formatted()
+            draw(y, 1, "\(source.id == selectedSlackID ? ">" : " ") \(source.workspaceName) / \(source.channelName) · \(source.enabled ? "enabled" : "disabled") · every \(source.intervalSeconds)s", width: columns - 2, emphasis: source.id == selectedSlackID ? 2 : 0)
+            draw(y + 1, 3, "Project: " + source.repository, width: columns - 4)
+            draw(y + 2, 3, "Last success: \(success) · next: \(next)", width: columns - 4)
+            draw(y + 3, 3, source.lastError.map { "Error: " + $0 } ?? "New messages, edits, and thread replies enter triage; initial history is baselined.", width: columns - 4)
+        }
+    }
+
     private func drawSources(rows: Int, columns: Int, left: Int, right: Int, width: Int) {
         draw(1, 1, "INCOMING (\(sources.count))", width: left, emphasis: 1)
         let selected = sources.firstIndex(where: { $0.id == selectedSourceID }) ?? 0
@@ -465,18 +587,21 @@ public final class TaskManagerTUI {
             for (offset, line) in lines.suffix(2).enumerated() { draw(rows - 3 + offset, 1, line, width: columns - 2) }
         } else {
             draw(rows - 4, 1, notice, width: columns - 2)
-            if showingGitHub && pickingGitHub {
+            if showingSlack {
+                draw(rows - 3, 1, pickingSlack ? "↑↓ select · Enter add · / filter · c clear · r refresh · Esc back" : "n discover/add · p enable/disable · i interval · ↑↓ select", width: columns - 2)
+                draw(rows - 2, 1, "l tasks · g GitHub · e incoming · q detach (polling continues)", width: columns - 2)
+            } else if showingGitHub && pickingGitHub {
                 draw(rows - 3, 1, "↑↓ select · Enter add (60s default) · / filter · c clear · r refresh · Esc back", width: columns - 2)
                 draw(rows - 2, 1, "Current checkout is inferred from origin; other repos need a local path · q detach", width: columns - 2)
             } else if showingGitHub {
                 draw(rows - 3, 1, "n discover/add · p enable/disable · i interval · ↑↓ select", width: columns - 2)
-                draw(rows - 2, 1, "g tasks · e incoming · q detach (polling continues)", width: columns - 2)
+                draw(rows - 2, 1, "l Slack · g tasks · e incoming · q detach (polling continues)", width: columns - 2)
             } else if showingSources {
                 draw(rows - 3, 1, "s inject source · a clarify · Enter open child · r retry · u unignore · x ignore", width: columns - 2)
-                draw(rows - 2, 1, "g GitHub · e tasks · ↑↓ select · PgUp/Dn scroll · Tab new-worker runtime · q detach", width: columns - 2)
+                draw(rows - 2, 1, "l Slack · g GitHub · e tasks · ↑↓ select · PgUp/Dn scroll · Tab new-worker runtime · q detach", width: columns - 2)
             } else {
                 draw(rows - 3, 1, "n new · m msg · a answer · p pause · t terminal · d remove · s source", width: columns - 2)
-                draw(rows - 2, 1, "g GitHub · e incoming · r retry · x cancel · Tab runtime · ↑↓ select · PgUp/Dn · q quit", width: columns - 2)
+                draw(rows - 2, 1, "l Slack · g GitHub · e incoming · r retry · x cancel · Tab runtime · ↑↓ select · PgUp/Dn · q quit", width: columns - 2)
             }
         }
     }

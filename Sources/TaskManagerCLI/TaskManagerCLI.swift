@@ -3,6 +3,7 @@ import TaskManagerCore
 import TaskManagerPersistence
 import CodexTransport
 import GitHubIntegration
+import SlackIntegration
 import TaskManagerRuntime
 import TaskManagerTUI
 
@@ -50,7 +51,7 @@ struct TaskManagerCLI {
             }
             return
         }
-        let known = ["init", "add", "list", "show", "status", "resume", "message", "ask", "answer", "questions", "journal", "ingest", "route", "propose-comment", "proposals", "decide", "github-import", "github-poll", "github-watch", "github-discover", "github-sources", "github-enable", "github-disable", "github-prs", "tui", "serve", "coordinator-stop", "agent-add", "transcript", "archive", "restore", "terminal", "release-terminal", "source-inject", "source-events", "source-answer", "source-retry", "source-ignore", "source-unignore", "slack-connect"]
+        let known = ["init", "add", "list", "show", "status", "resume", "message", "ask", "answer", "questions", "journal", "ingest", "route", "propose-comment", "proposals", "decide", "github-import", "github-poll", "github-watch", "github-discover", "github-sources", "github-enable", "github-disable", "github-prs", "tui", "serve", "coordinator-stop", "agent-add", "transcript", "archive", "restore", "terminal", "release-terminal", "source-inject", "source-events", "source-answer", "source-retry", "source-ignore", "source-unignore", "slack-connect", "slack-conversations", "slack-watch", "slack-sources", "slack-enable", "slack-disable", "slack-poll"]
         guard known.contains(command) else { throw ManagerError.invalid("Unknown command: \(command). Run task-manager help.") }
         try FileManager.default.createDirectory(atPath: statePath, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         statePath = URL(fileURLWithPath: statePath).standardizedFileURL.resolvingSymlinksInPath().path
@@ -59,12 +60,32 @@ struct TaskManagerCLI {
             guard args.count == expected else { throw ManagerError.invalid("Incorrect arguments for \(command). Run task-manager help.") }
         }
         switch command {
+        case "slack-conversations":
+            try count(0); try output(await SlackDiscovery.discover(stateDirectory: statePath))
+        case "slack-sources": try count(0); try output(await store.slackSources())
+        case "slack-watch":
+            guard args.count == 3 || args.count == 4 else { throw ManagerError.invalid("slack-watch WORKSPACE_ID CHANNEL_ID LOCAL_REPO [SECONDS]") }
+            let interval = args.count == 4 ? Int(args[3]) : 60
+            guard let interval else { throw ManagerError.invalid("Interval must be seconds") }
+            let discovered = try await SlackDiscovery.discover(stateDirectory: statePath)
+            guard let item = discovered.first(where: { $0.connection.workspaceID == args[0] && $0.conversation.id == args[1] }) else { throw ManagerError.notFound("Conversation was not found in connected Slack workspaces") }
+            print(try await store.addSlackSource(workspaceID: item.connection.workspaceID, workspaceName: item.connection.workspaceName, userID: item.connection.userID, channelID: item.conversation.id, channelName: item.conversation.name, repository: args[2], intervalSeconds: interval))
+        case "slack-enable", "slack-disable":
+            try count(1); try await store.setSlackSourceEnabled(args[0], enabled: command == "slack-enable")
+        case "slack-poll":
+            try count(1)
+            guard let source = try await store.slackSources().first(where: { $0.id == args[0] }) else { throw ManagerError.notFound("Unknown Slack source") }
+            let cursor = try await store.pollingCursor(sourceKey: source.id, repository: source.repository, workerKind: .codex)
+            let client = SlackClient(token: try SlackConnection.token(workspaceID: source.workspaceID, userID: source.userID))
+            let events = try await client.feedback(workspace: source.workspaceID, channel: source.channelID)
+            let inserted = try await store.commitSlackPoll(source.id, expectedGeneration: cursor?.generation, events: events)
+            print(cursor == nil ? "Baselined \(inserted) historical Slack revisions" : "Queued \(inserted) new Slack revisions")
         case "slack-connect":
             try count(0)
             let token = try await SlackConnection.promptToken()
             do {
                 let info = try await SlackConnection.connect(token: token, stateDirectory: statePath)
-                let message = "Connected to \(info.workspaceName). Your token is saved in macOS Keychain. Slack message polling is not enabled yet."
+                let message = "Connected to \(info.workspaceName). Your token is saved in macOS Keychain. Select conversations in the TUI Slack view (l) to enable automatic polling."
                 print(message)
                 fflush(stdout)
                 await SlackConnection.showResult(title: "Slack connected", message: message)
@@ -217,6 +238,13 @@ struct TaskManagerCLI {
                                             Inject a mock source; real master chooses its destination
       source-events                         Show incoming events and master decisions
       slack-connect                         Secure dialog to verify and save a Slack user token
+      slack-conversations                   Discover connected Slack channels and DMs
+      slack-watch WORKSPACE_ID CHANNEL_ID LOCAL_REPO [SECONDS]
+                                            Enable automatic conversation polling
+      slack-sources                         List Slack polling health
+      slack-enable SOURCE_ID                Enable Slack conversation polling
+      slack-disable SOURCE_ID               Disable Slack conversation polling
+      slack-poll SOURCE_ID                  Poll a configured Slack conversation once
       source-answer EVENT_ID TEXT           Answer master clarification
       source-retry EVENT_ID                  Retry failed triage
       source-unignore EVENT_ID              Reconsider an ignored event through master triage

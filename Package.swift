@@ -18,9 +18,10 @@ let package = Package(
         .target(name: "TaskManagerPersistence", dependencies: ["TaskManagerCore", "CSQLite"]),
         .target(name: "CodexTransport", dependencies: ["TaskManagerCore"]),
         .target(name: "GitHubIntegration", dependencies: ["TaskManagerCore"]),
-        .target(name: "TaskManagerRuntime", dependencies: ["TaskManagerCore", "TaskManagerPersistence", "CodexTransport", "GitHubIntegration", "CLocalSupport"]),
+        .target(name: "SlackIntegration", dependencies: ["TaskManagerCore"]),
+        .target(name: "TaskManagerRuntime", dependencies: ["TaskManagerCore", "TaskManagerPersistence", "CodexTransport", "GitHubIntegration", "SlackIntegration", "CLocalSupport"]),
         .target(name: "TaskManagerTUI", dependencies: ["TaskManagerCore", "TaskManagerPersistence", "TaskManagerRuntime", "CLocalSupport"]),
-        .executableTarget(name: "TaskManagerCLI", dependencies: ["TaskManagerCore", "TaskManagerPersistence", "CodexTransport", "GitHubIntegration", "TaskManagerRuntime", "TaskManagerTUI"]),
-        .testTarget(name: "TaskManagerTests", dependencies: ["TaskManagerCore", "TaskManagerPersistence", "CodexTransport", "GitHubIntegration", "TaskManagerRuntime", "TaskManagerTUI"]),
+        .executableTarget(name: "TaskManagerCLI", dependencies: ["TaskManagerCore", "TaskManagerPersistence", "CodexTransport", "GitHubIntegration", "TaskManagerRuntime", "TaskManagerTUI", "SlackIntegration"]),
+        .testTarget(name: "TaskManagerTests", dependencies: ["TaskManagerCore", "TaskManagerPersistence", "CodexTransport", "GitHubIntegration", "TaskManagerRuntime", "TaskManagerTUI", "SlackIntegration"]),
     ]
 )
