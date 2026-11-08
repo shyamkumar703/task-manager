@@ -144,6 +144,7 @@ public final class TaskManagerTUI {
             switch key {
             case 10, 13, 343:
                 if let id = source.taskID {
+                    guard tasks.contains(where: { $0.id == id }) else { notice = "Destination task is archived or unavailable; restore it to inspect it"; return }
                     selectedID = id; showingSources = false; scroll = 0
                     try await reload()
                 } else { notice = "This source has no child task yet" }
@@ -299,7 +300,8 @@ public final class TaskManagerTUI {
             return
         }
         draw(2, right, "Source #\(event.id) · \(event.integration) · \(event.disposition.rawValue)", width: width, emphasis: 1)
-        draw(3, right, "New work uses \(event.workerKind.rawValue). Master triage uses Codex.", width: width)
+        let runtime = event.targetWorkerKind.map { "Child runtime: \($0.rawValue.uppercased())" } ?? "New work uses \(event.workerKind.rawValue.uppercased())"
+        draw(3, right, runtime + " · master uses Codex", width: width)
         var lines = ["SOURCE MESSAGE"] + TerminalText.wrap(event.body, width: width) + [""]
         if let reason = event.reason { lines += ["DECISION"] + TerminalText.wrap(reason, width: width) + [""] }
         if let id = event.taskID {

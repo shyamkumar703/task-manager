@@ -23,6 +23,7 @@ public struct IncomingSource: Codable, Sendable, Identifiable {
     public let attempts: Int
     public let messageID: String?
     public let messageDelivered: Bool?
+    public let targetWorkerKind: WorkerKind?
 }
 
 public enum TriageAction: String, Codable, Sendable { case route, create, ignore, clarify }

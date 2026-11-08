@@ -155,9 +155,11 @@ Attach/detach the TUI, run a manually created task through the worker, answer a 
 
 The immediate product milestone is this manual UI loop, before live source testing. Support a mock worker alongside real Codex so interaction tests do not depend on a source integration or model calls.
 
-### 4. GitHub ingestion and proactive routing
+### 4. Mock source triage, then live ingestion
 
-Implement the read adapter, source identity/revisions, bootstrap behavior, context lookup, deterministic associations, and schema-validated master triage. In the test repo, feedback should produce one appropriate task without a direct assignment. A related follow-up updates it; irrelevant discussion is ignored with a recorded reason. Exercise pagination, edited events, overlapping polls, and transient/rate-limit failures using fixtures.
+First expose a mock incoming-source form in the TUI. The real master compares source content with scoped task goals and recent conversation, then routes, creates, ignores, or asks for clarification. Show decisions/reasons and downstream delivery status. Commit decisions, learned source associations, and task/inbox changes atomically. Verify relevance routing while an unrelated child is selected and the actual destination is running. Master questions must not block other events or workers.
+
+Then connect live adapters with repository scope, source identity/revisions, bootstrap baselines, context lookup, and cursor/backoff handling. The GitHub read adapter already exists. In the test repo, feedback should produce one appropriate task without a direct assignment. A related follow-up updates it; irrelevant discussion is ignored with a recorded reason. Exercise pagination, edited events, overlapping polls, and transient/rate-limit failures using fixtures.
 
 ### 5. Worktree investigation and approval broker
 

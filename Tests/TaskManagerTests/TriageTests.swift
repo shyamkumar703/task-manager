@@ -1,5 +1,6 @@
 import CodexTransport
 import Foundation
+import GitHubIntegration
 import TaskManagerCore
 import TaskManagerPersistence
 import TaskManagerRuntime
@@ -39,6 +40,8 @@ private func eventually(_ condition: () async throws -> Bool) async throws {
     #expect(routed.reason == decision.reason)
     #expect(routed.messageDelivered == false)
     #expect(routed.taskID == task.id)
+    #expect(routed.workerKind == .codex)
+    #expect(routed.targetWorkerKind == .mock)
     let followup = SourceEvent(integration: "slack", sourceID: "message:2", revision: "1", associationKey: event.associationKey, body: "And newlines", url: event.url)
     try await reopened.ingest([followup], repository: root)
     #expect(try await reopened.routeKnownEvents() == 1)
@@ -254,4 +257,25 @@ private actor FakeMasterConnection: AgentConnection {
     let malformed = FakeMasterConnection(finalText: "not-json")
     let invalid = CodexMasterTriage(stateDirectory: root, factory: { malformed })
     await #expect(throws: (any Error).self) { try await invalid.decide(event: event, candidates: []) }
+}
+
+@Test func triageSchemaUpgradePreservesV3TaskHistoryAndManualOwnership() async throws {
+    let root = try triageRoot()
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    let path = root + "/state.sqlite"
+    let store = try Store(path: path)
+    let task = try await store.createAgentTask(goal: "Keep my terminal", repository: root, kind: .codex)
+    try await store.setWorkspace(taskID: task.id, path: root)
+    try await store.setThread(taskID: task.id, threadID: "persisted-thread")
+    _ = try await store.claimTerminal(taskID: task.id)
+    let sqlite = GHProcessRunner(executable: URL(fileURLWithPath: "/usr/bin/sqlite3"))
+    let fixture = try await sqlite.run(arguments: [path, "DROP TABLE source_links; DROP TABLE event_context; PRAGMA user_version = 3;"])
+    #expect(fixture.exitCode == 0)
+    let upgraded = try Store(path: path)
+    #expect(try await upgraded.task(task.id).status == .paused)
+    #expect(try await upgraded.agentSession(taskID: task.id)?.manualActive == true)
+    #expect(try await upgraded.agentSession(taskID: task.id)?.threadID == "persisted-thread")
+    let id = try await upgraded.injectSource(body: "New update", repository: root)
+    #expect(try await upgraded.source(id).disposition == .pending)
+    try await upgraded.releaseTerminal(taskID: task.id)
 }

@@ -2,7 +2,7 @@
 
 A local autonomous task manager, implemented in Swift. See [SPEC.md](SPEC.md) and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the intended system.
 
-The current implementation supports manually driven child workers through a TUI: create tasks, watch progress, send messages during a turn, answer questions, and pause/resume work. A background coordinator owns the workers and durable SQLite state. Tasks can use a mock worker or real Codex in an isolated git worktree. GitHub reads are available separately; automatic source polling and master-agent triage are still to come.
+The current implementation supports child workers and source-message triage through a TUI: create tasks, watch progress, send messages during a turn, inject incoming source messages, answer questions, and pause/resume work. A real Codex master decides whether incoming messages affect existing tasks, require new work, need clarification, or can be ignored. A background coordinator owns workers and durable SQLite state. Tasks can use a mock worker or real Codex in an isolated git worktree. GitHub reads are available separately; continuous live-source polling is still to come.
 
 ## Build and verify
 
@@ -47,6 +47,8 @@ The TUI starts or attaches to a coordinator for that state directory. It opens i
 | `x` | Cancel the selected task, preserving its local work |
 | `t` | Open an interactive shell in the selected child's worktree |
 | `d` | Remove the selected task from the list, retaining its history |
+| `s` | Inject a mock source message for real master triage |
+| `e` | Switch between tasks and incoming source events |
 | `Tab` | Switch new tasks between MOCK and CODEX |
 | Up/Down or `j`/`k` | Select a task |
 | PageUp/PageDown | Scroll its conversation |
@@ -88,6 +90,40 @@ After rebuilding, reopen the TUI to load new controls. It gracefully replaces ol
 Codex workers use full access and no runtime approval prompts, as requested. They are instructed to work locally and not publish or mutate external systems. That instruction is not a sandbox-enforced guarantee. The application's external action executor remains disabled.
 
 For scripts or a separate terminal, `serve` runs the coordinator in the foreground, `agent-add mock|codex REPO GOAL` queues a task, and `transcript TASK_ID` prints saved output. These use the same state and workers as the UI.
+
+## Try source-driven routing
+
+Create or resume a child, then press **`s`** and enter an incoming message. This is a mocked data source, not a direct message to the selected child. The real Codex master compares the message with task goals and recent conversation in the repository passed to `tui`; UI selection does not determine the destination.
+
+For example, with a task investigating todo title validation, inject:
+
+> Product update: whitespace-only titles must print "title is required" rather than creating an item. This also applies to tabs and newlines.
+
+The master can route the update to an existing child, create a distinct task, ignore unrelated chatter, or ask a clarification question. Relevant findings and decisions can be routed even if they contain no direct request. Routing to a running Codex child uses the existing `turn/steer` path; paused/waiting tasks retain their state and keep the update in their inbox. Completed tasks can be continued. An existing destination keeps its runtime; the header's runtime selection applies only when the master creates a new task.
+
+The incoming-events view shows the source text, decision, reason, destination, actual child runtime, and QUEUED/ACCEPTED delivery status. Press:
+
+- **`e`** to inspect incoming events or return to tasks.
+- **Enter** on a routed/created event to open its child.
+- **`a`** on a waiting event to answer the master's question; the original message and clarification are reconsidered together.
+- **`r`** to retry failed triage.
+- **`x`** to ignore an unapplied event. Already-delivered messages cannot be unsent.
+
+Master clarification does not block other events or child workers. Decisions, learned source-thread links, task creation, and inbox messages persist transactionally. Duplicate source ID/revision pairs cannot create duplicate work. Known associations route directly; unknown messages use the master. Archived/cancelled associations require clarification before separate work can be created. Model failures back off for up to three attempts and remain visible for manual retry.
+
+The master always uses Codex, even when new child tasks are configured as MOCK. It uses a read-only classification session with shell/apps/web search disabled and returns schema-validated decisions. It does not implement the work itself. The context currently includes up to 64 eligible tasks in the source repository and bounded recent conversation; unclear relevance should result in clarification. Live Slack/GitHub polling is not enabled by this input form.
+
+CLI equivalents, with a coordinator running for the same state directory:
+
+```sh
+.build/debug/task-manager --state-dir .state/dev source-inject codex \
+  /Users/shyamkumar/Developer/todo_list_task_manager_test \
+  'Product update: reject whitespace-only todo titles.'
+.build/debug/task-manager --state-dir .state/dev source-events
+.build/debug/task-manager --state-dir .state/dev source-answer EVENT_ID 'The add command.'
+```
+
+`source-inject` optionally accepts an association key after the text to simulate repeated events in the same source thread. Future adapters can register normalized events with `Store.ingest(..., repository: ..., workerKind: ...)` to use this same triage pipeline. Legacy unscoped imports retain explicit-association routing but do not trigger model-based work creation without a configured local repository.
 
 ## Core CLI walkthrough
 

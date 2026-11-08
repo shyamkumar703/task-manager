@@ -229,7 +229,7 @@ extension Store {
     }
 
     private var sourceQuery: String {
-        "SELECT e.*, c.*, m.delivered AS message_delivered FROM events e JOIN event_context c ON c.event_id = e.id LEFT JOIN messages m ON m.id = c.message_id"
+        "SELECT e.*, c.*, m.delivered AS message_delivered, s.kind AS target_kind FROM events e JOIN event_context c ON c.event_id = e.id LEFT JOIN messages m ON m.id = c.message_id LEFT JOIN agent_sessions s ON s.task_id = e.task_id"
     }
 
     private func decodeSource(_ row: [String: String]) throws -> IncomingSource {
@@ -238,6 +238,7 @@ extension Store {
             if let value = row[column] { object[property] = value }
         }
         if let delivered = row["message_delivered"] { object["messageDelivered"] = delivered == "1" }
+        if let kind = row["target_kind"] { object["targetWorkerKind"] = kind }
         return try decode(IncomingSource.self, object)
     }
 }

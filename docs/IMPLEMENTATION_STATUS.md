@@ -46,7 +46,7 @@ Validation:
 - **Forced process crash passed:** killed a coordinator during a running mock task, saved a message while stopped, restarted, and verified the task reopened paused with the message still pending. Evidence: `.state/recovery-smoke/RESULTS.txt` and its database.
 - Original offline smoke test and test-checkout smoke test pass. Latest checkout evidence: `.task-manager-state/run.syPsvU/`.
 
-Remaining product work: user testing/refinement of the manual UI, automatic master triage, continuous source polling/baselines/backoff, structured external action proposals from workers, publication with explicit approval/reconciliation, online backup/log rotation, stronger subprocess-tree recovery, and optional launchd management. Full-access workers are instructed not to publish; that is not an OS-enforced barrier.
+Remaining at that checkpoint: user testing/refinement of the manual UI, automatic master triage, continuous source polling/baselines/backoff, structured external action proposals from workers, publication with explicit approval/reconciliation, online backup/log rotation, stronger subprocess-tree recovery, and optional launchd management. Full-access workers are instructed not to publish; that is not an OS-enforced barrier. Master triage is implemented in the later source-event section below.
 
 ## Worktree terminals and task removal
 
@@ -57,3 +57,21 @@ Added `d` to archive tasks and hide them across restarts. Archiving pauses activ
 Schema v3 adds archival timestamps and worker/manual workspace ownership. Worker startup claims execution atomically; releasing a runtime clears its ownership after stopping the connection. A manual terminal reservation excludes workers until the shell closes. CLI `terminal` and `release-terminal` support manual access and explicit stale-ownership recovery. Reopening a rebuilt TUI gracefully upgrades an incompatible coordinator before exposing ownership-dependent controls.
 
 Validation: **40 tests pass**. Added coverage for archive persistence, retained history, archived-question filtering/restoration, source/approval/message guards, active-worker shutdown on archive, terminal handoff waiting, exclusive ownership, and timeout cleanup. Real PTY checks verified shell cwd/branch, return to TUI, immediate task removal, and retained `list --all` history. A compatibility-marker test verified graceful replacement of an older coordinator. Original smoke and repository-local smoke tests also pass. No pushes were performed.
+
+## Source-event master triage
+
+Added TUI `s` to inject an incoming source message and `e` to inspect the source inbox. This input does not attach a message to the selected task. A bounded real Codex master compares event content with up to 64 eligible task goals and recent conversation in the configured repository, returning a schema-validated route/create/ignore/clarify decision and reason. Its ephemeral read-only session disables shell, apps, and web search; it performs classification rather than implementing work.
+
+Schema v4 adds source context and repository-scoped association links. Decision application, child creation, provenance-preserving messages, learned associations, and journal entries share a transaction. Duplicate event identities and repeated decision application cannot duplicate work. Known associations route directly; ambiguous or archived/cancelled associations wait for clarification. Clarification and model failures do not consume a child slot or block other events. Failures back off for three attempts, manual retry/ignore are available, and interrupted triage recovers to the pending inbox.
+
+The source view shows decision reasons, destination/runtime, and child acceptance status; Enter opens the destination, `a` answers master clarification, `r` retries failed triage, and `x` ignores unapplied events. New work uses the event's selected worker kind; routing preserves the existing child's kind and paused/waiting state. Added CLI source injection, inspection, answer, retry, and ignore commands. Live polling remains separate; normalized events opt into triage by supplying their local repository scope.
+
+Committed the initial implementation as `b19aead`. Validation: **50 tests pass**, covering atomic route/create/ignore/clarify behavior, deduplication, learned associations, cross-repository rejection, archive/clarification races, retry/recovery, nonblocking master questions, actual inbox propagation to an active mock worker, bounded Codex master responses, and v3-to-v4 migration preserving task history and manual workspace ownership.
+
+Live checks:
+
+- Real master routed a tab/newline validation update to an existing paused title-validation task, explaining relevance and preserving its paused state. Evidence: `.state/master-probe/`.
+- A second real master check routed an FYI-only acceptance-criteria change to that task without requiring a direct imperative; it again preserved the pause.
+- In the real TUI, selected an unrelated paused CSV-export task, then injected a naming update. The real master chose the running command-naming Codex child, committed one inbox message, and the child accepted it through `turn/steer`. Its final response incorporated the source decision; no extra task was created. Evidence: `.state/triage-ui/RESULTS.txt` and its database/worktree.
+- The child changed no files or external systems. Demo coordinators were stopped after verification; user task state was not modified.
+- Both existing smoke scripts pass under schema v4; latest repository-local evidence is `.task-manager-state/run.DoJtdE/` in the todo-list test checkout.
