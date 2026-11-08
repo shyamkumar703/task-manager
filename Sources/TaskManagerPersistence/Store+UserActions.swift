@@ -15,22 +15,26 @@ extension Store {
                 try db.execute("UPDATE event_context SET reason = 'Independent exploration needs a project', question = 'Which local project should be inspected? Enter its absolute checkout path.' WHERE event_id = ?", [String(id)])
                 return nil
             }
-            let child = try insertAgentTask(goal: "Answer the source question from the default branch and prepare a suggested reply:\n" + String(event.body.prefix(7900)), repository: repository, kind: event.workerKind, purpose: .exploration)
+            let child = try insertAgentTask(goal: "Answer the source question using its PR/branch context and prepare a suggested reply:\n" + String(event.body.prefix(7900)), repository: repository, kind: event.workerKind, purpose: .exploration)
             let context = try event.slackContext ?? slackRoutingContext(for: event)
             let message = try insertMessage(taskID: child.id, body: sourceMessage(integration: event.integration, url: event.url, body: event.body, clarification: event.clarification, context: context))
             try db.execute("UPDATE events SET disposition = 'created', task_id = ? WHERE id = ?", [child.id, String(id)])
-            try db.execute("UPDATE event_context SET repository = ?, message_id = ?, reason = 'Independent default-branch exploration requested by user', question = NULL, last_error = NULL WHERE event_id = ?", [repository, message, String(id)])
+            try db.execute("UPDATE event_context SET repository = ?, message_id = ?, reason = 'Independent source-context exploration requested by user', question = NULL, last_error = NULL WHERE event_id = ?", [repository, message, String(id)])
             try log(taskID: child.id, kind: "source.reinvestigated", detail: "Source \(id); previous target \(event.taskID ?? "none") retained in history")
             return child.id
         }
     }
 
-    public func setExplorationWorkspace(taskID: String, path: String, baseRef: String, baseSHA: String) throws {
+    public func setExplorationWorkspace(taskID: String, path: String, baseRef: String, baseSHA: String, context: String? = nil) throws {
         try db.transaction {
             guard let session = try agentSession(taskID: taskID), session.purpose == .exploration,
                   session.workspace == nil || (session.workspace == path && session.baseRef == baseRef && session.baseSHA == baseSHA) else { throw ManagerError.conflict("Exploration snapshot cannot be changed") }
             try db.execute("UPDATE agent_sessions SET workspace = ?, base_ref = ?, base_sha = ? WHERE task_id = ?", [path, baseRef, baseSHA, taskID])
             try log(taskID: taskID, kind: "exploration.snapshot", detail: "\(baseRef) @ \(baseSHA)")
+            if let context {
+                try writeOutput(taskID: taskID, itemID: "inspection-context", kind: "system", text: context)
+                try log(taskID: taskID, kind: "exploration.context.selected", detail: context)
+            }
         }
     }
     public func completeExploration(taskID: String, findings: String, reply: String) throws {
@@ -39,7 +43,8 @@ extension Store {
             guard let session = try agentSession(taskID: taskID), session.purpose == .exploration,
                   try task(taskID).status == .running else { throw ManagerError.conflict("Exploration is not running") }
             guard let event = try db.query("SELECT id, url FROM events WHERE task_id = ? AND disposition = 'created' ORDER BY id LIMIT 1", [taskID]).first else { throw ManagerError.notFound("Investigation has no source message") }
-            let context = "Inspected \(session.baseRef ?? "mock snapshot") @ \(session.baseSHA ?? "mock"). This is the locally available default-branch snapshot; no remote refresh was performed.\n\n" + findings
+            let provenance = try outputs(taskID: taskID).first { $0.itemID == "inspection-context" }?.text ?? "Local inspection; no remote refresh was performed."
+            let context = "Inspected \(session.baseRef ?? "mock snapshot") @ \(session.baseSHA ?? "mock").\n\(provenance)\n\n" + findings
             try db.execute("INSERT INTO user_actions(id, task_id, source_event_id, target, body, context) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET body = excluded.body, context = excluded.context, status = 'open'", [UUID().uuidString, taskID, event["id"]!, event["url"]!, String(reply.prefix(65536)), String(context.prefix(65536))])
             try changeStatus(taskID, to: .completed)
             try log(taskID: taskID, kind: "user_action.ready", detail: "Suggested reply ready for source event \(event["id"]!). Nothing was sent.")

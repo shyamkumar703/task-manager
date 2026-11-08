@@ -113,7 +113,13 @@ public struct CodexMasterTriage: TriageEngine {
     only for create/investigate; it must be null for every other action.
     Return exactly one structured decision with a brief specific reason:
     - route: the event updates or affects an existing candidate task. Use its exact ID; goal/question null.
-      Prefer continuing relevant existing work over creating duplicate tasks. Completed tasks can be continued.
+      Prefer continuing relevant existing work over creating duplicate tasks. Completed means the latest
+      scope finished, not that feedback is closed: resume the same task/thread/worktree for follow-ups.
+      event.githubContext identifies the PR head and owningTaskID by its actual checked-out branch.
+      A requested PR change/refactor/review fix belongs to that owning implementation task even if
+      its original goal was satisfied. Never create a new implementation task for that PR merely
+      because the change has a new description. Use the owner unless a user explicitly requests
+      separate work; conflicts still require a question. A new explanatory question may investigate.
       Relevant findings, status changes, decisions, and constraints should be routed even when the message
       is only an FYI and contains no direct request. They may change an ongoing child's next step.
       Routing to a paused or waiting task preserves that state; it only adds information to its inbox.
@@ -130,10 +136,13 @@ public struct CodexMasterTriage: TriageEngine {
     - investigate: information-seeking questions, requests to explain current behavior, research or
       exploration that should produce an answer rather than implementation changes. Spawn a fresh
       exploratory task even when a related implementation task is completed. A feature worktree is
-      not evidence of current default-branch behavior. Supply a clear investigation goal. taskID may
+      not evidence of default-branch behavior, but a PR question refers to the PR head and its existing
+      checkout, including named files and review diff context. Do not hard-code main/default branch
+      into PR investigation goals. Explicit branch/PR references take priority over a generic default.
+      Supply a clear investigation goal. taskID may
       identify a related candidate only as project context; do not resume or modify that task.
       Otherwise choose a known repository (or keep the scoped event repository); question null.
-      The explorer inspects a read-only default-branch snapshot and prepares a suggested response
+      The explorer uses read-only source-specific inspection context and prepares a suggested response
       as a user action. Nothing is sent automatically. A follow-up to a currently running exploration
       may route to that explorer; a new question or completed exploration needs a fresh snapshot.
       Example: "What commands are available right now?" => investigate, not route to the task that
@@ -183,9 +192,15 @@ public actor SourceTriage {
         defer { activeID = nil; job = nil }
         do {
             let candidates = try await store.triageCandidates(repository: event.repository)
-            let decision = try await engine.decide(event: event, candidates: candidates)
+            let context = try await GitHubContextResolver().resolve(source: event, candidates: candidates)
+            let contextualEvent: IncomingSource
+            if let context { contextualEvent = try await store.recordGitHubContext(eventID: event.id, context: context) }
+            else { contextualEvent = event }
+            let decision = try await engine.decide(event: contextualEvent, candidates: candidates)
             try Task.checkCancellation()
             _ = try await store.applyTriage(eventID: event.id, decision: decision)
+        } catch let question as InspectionContextQuestion {
+            try? await store.clarifySourceContext(event.id, question: question.prompt)
         } catch {
             if Task.isCancelled {
                 try? await store.requeueTriage(event.id)

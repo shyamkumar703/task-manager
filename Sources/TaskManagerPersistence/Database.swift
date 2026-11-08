@@ -89,7 +89,7 @@ final class Database {
     private func migrate() throws {
         try transaction {
             let version = try query("PRAGMA user_version").first?["user_version"] ?? "0"
-            guard ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"].contains(version) else {
+            guard ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"].contains(version) else {
                 throw ManagerError.storage("Database schema \(version) is newer than this application")
             }
             if version == "0" {
@@ -218,6 +218,11 @@ final class Database {
                 try execute("CREATE TABLE IF NOT EXISTS slack_messages (source_key TEXT NOT NULL REFERENCES slack_sources(id), timestamp TEXT NOT NULL, thread_timestamp TEXT NOT NULL, author TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(source_key, timestamp))")
                 try execute("UPDATE slack_workspaces SET next_discovery = 0")
                 try execute("PRAGMA user_version = 10")
+            }
+            if version != "11" {
+                let columns = try query("PRAGMA table_info(event_context)").compactMap { $0["name"] }
+                if !columns.contains("github_context") { try execute("ALTER TABLE event_context ADD COLUMN github_context TEXT") }
+                try execute("PRAGMA user_version = 11")
             }
         }
     }

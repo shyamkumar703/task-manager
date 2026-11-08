@@ -57,6 +57,33 @@ extension Store {
         }
     }
 
+    public func sources(taskID: String) throws -> [IncomingSource] {
+        try db.query(sourceQuery + " WHERE e.task_id = ? ORDER BY e.id", [taskID]).map(decodeSource)
+    }
+
+    public func recordGitHubContext(eventID: Int64, context: GitHubRoutingContext) throws -> IncomingSource {
+        try db.transaction {
+            let event = try source(eventID)
+            guard event.disposition == .triaging else { throw ManagerError.conflict("Source review changed while resolving PR context") }
+            if let id = context.owningTaskID, let session = try agentSession(taskID: id), session.purpose == .implementation {
+                let task = try task(id)
+                guard task.archivedAt == nil, task.status != .cancelled,
+                      event.repository.isEmpty || event.repository == session.repository else { throw ManagerError.conflict("PR task is no longer available") }
+                let key = "github:\(context.repository.lowercased()):pr:\(context.pullRequest)"
+                try db.execute("INSERT INTO source_links(repository, association_key, task_id) VALUES (?, ?, ?) ON CONFLICT(repository, association_key) DO UPDATE SET task_id = excluded.task_id", [session.repository, key, id])
+                if event.associationKey == key { try db.execute("UPDATE events SET task_id = ? WHERE id = ?", [id, String(eventID)]) }
+                try log(taskID: id, kind: "source.pr.associated", detail: "PR #\(context.pullRequest) head \(context.headBranch) matches this task's worktree")
+            }
+            let json = String(decoding: try JSONEncoder().encode(context), as: UTF8.self)
+            try db.execute("UPDATE event_context SET github_context = ? WHERE event_id = ?", [json, String(eventID)])
+            return try source(eventID)
+        }
+    }
+
+    public func clarifySourceContext(_ id: Int64, question: String) throws {
+        try db.transaction { try holdSource(id, reason: "Inspection context needs clarification", question: question) }
+    }
+
     public func sourcesNeedingAttention() throws -> [IncomingSource] {
         try db.query(sourceQuery + " WHERE e.disposition IN ('waitingForUser','failed') ORDER BY e.id").map(decodeSource)
     }
@@ -140,7 +167,7 @@ extension Store {
             let instructions = try db.query("SELECT body FROM messages WHERE task_id = ? ORDER BY sequence DESC LIMIT 8", [task.id]).reversed().map {
                 "Task inbox (source data includes separately labeled user clarification): " + String($0["body"]!.prefix(4000))
             }
-            return TriageCandidate(id: task.id, goal: String(task.goal.prefix(4096)), status: task.status, repository: try agentSession(taskID: task.id)!.repository, recentContext: resolutions + instructions + recent, purpose: try agentSession(taskID: task.id)!.purpose)
+            return TriageCandidate(id: task.id, goal: String(task.goal.prefix(4096)), status: task.status, repository: try agentSession(taskID: task.id)!.repository, recentContext: resolutions + instructions + recent, purpose: try agentSession(taskID: task.id)!.purpose, workspace: try agentSession(taskID: task.id)!.workspace)
         }
     }
 
@@ -203,9 +230,13 @@ extension Store {
                 let task = try insertAgentTask(goal: decision.goal!, repository: destinationRepository, kind: event.workerKind, purpose: .exploration)
                 targetID = task.id
                 messageID = try insertMessage(taskID: task.id, body: sourceMessage(integration: event.integration, url: event.url, body: event.body, clarification: event.clarification, context: event.slackContext))
-                try log(taskID: task.id, kind: "exploration.created", detail: "Source \(eventID); related task \(decision.taskID ?? "none"); inspect default branch, not an implementation worktree")
+                try log(taskID: task.id, kind: "exploration.created", detail: "Source \(eventID); related task \(decision.taskID ?? "none"); select inspection context from source PR/branch, otherwise default branch")
             case .create:
                 let associated = try associationTargets(key: event.associationKey, repository: event.repository)
+                if let githubContext = event.githubContext, let owner = githubContext.owningTaskID, associated.contains(where: { $0.id == owner && $0.archivedAt == nil && $0.status != .cancelled }) {
+                    try holdSource(eventID, reason: "The PR head belongs to an existing implementation task; new work would duplicate its checkout", question: "PR #\(githubContext.pullRequest) belongs to task \(owner). Should this request continue that task? Separate work can be created explicitly from Home.")
+                    return true
+                }
                 guard associated.isEmpty || (event.clarification != nil && associated.allSatisfy { $0.archivedAt != nil || $0.status == .cancelled }) else {
                     throw ManagerError.conflict("This source acquired an association while triage was running; retry to use it")
                 }
@@ -361,6 +392,7 @@ extension Store {
         for (column, property) in [("task_id", "taskID"), ("reason", "reason"), ("question", "question"), ("clarification", "clarification"), ("last_error", "lastError"), ("message_id", "messageID")] {
             if let value = row[column] { object[property] = value }
         }
+        if let context = row["github_context"] { object["githubContext"] = try JSONSerialization.jsonObject(with: Data(context.utf8)) }
         if let context = row["routing_context"] { object["slackContext"] = try JSONSerialization.jsonObject(with: Data(context.utf8)) }
         if row["repository"] == "" { object["availableRepositories"] = try knownRepositories() }
         if let delivered = row["message_delivered"] { object["messageDelivered"] = delivered == "1" }

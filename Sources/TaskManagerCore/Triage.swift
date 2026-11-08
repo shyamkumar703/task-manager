@@ -15,6 +15,7 @@ public struct IncomingSource: Codable, Sendable, Identifiable {
     public let repository: String
     public let availableRepositories: [String]?
     public let slackContext: SlackRoutingContext?
+    public let githubContext: GitHubRoutingContext?
     public let workerKind: WorkerKind
     public let disposition: SourceDisposition
     public let taskID: String?
@@ -77,9 +78,10 @@ public struct TriageCandidate: Codable, Sendable {
     public let status: TaskStatus
     public let repository: String
     public let recentContext: [String]
+    public let workspace: String?
     public let purpose: WorkerPurpose
 
-    public init(id: String, goal: String, status: TaskStatus, repository: String, recentContext: [String], purpose: WorkerPurpose = .implementation) {
-        self.id = id; self.goal = goal; self.status = status; self.repository = repository; self.recentContext = recentContext; self.purpose = purpose
+    public init(id: String, goal: String, status: TaskStatus, repository: String, recentContext: [String], purpose: WorkerPurpose = .implementation, workspace: String? = nil) {
+        self.id = id; self.goal = goal; self.status = status; self.repository = repository; self.recentContext = recentContext; self.purpose = purpose; self.workspace = workspace
     }
 }

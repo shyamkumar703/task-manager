@@ -52,7 +52,12 @@ public enum GitHubError: Error, Sendable, CustomStringConvertible {
 
 public struct GitHubPullRequest: Codable, Sendable {
     public struct User: Codable, Sendable { public let login: String }
-    public struct Head: Codable, Sendable { public let sha: String }
+    public struct Head: Codable, Sendable {
+        public struct Repository: Codable, Sendable { public let full_name: String }
+        public let sha: String
+        public let ref: String?
+        public let repo: Repository?
+    }
     public let number: Int
     public let title: String
     public let user: User
@@ -90,6 +95,12 @@ public struct GitHubClient: Sendable {
         return pulls.filter { $0.user.login.caseInsensitiveCompare(author) == .orderedSame }
     }
 
+    public func pullRequest(in repository: GitHubRepository, number: Int) async throws -> GitHubPullRequest {
+        guard number > 0 else { throw ManagerError.invalid("PR number must be positive") }
+        let result = try await response(path: "/repos/\(repository.slug)/pulls/\(number)")
+        return try JSONDecoder().decode(GitHubPullRequest.self, from: result.data)
+    }
+
     /// Explicit PR selection avoids unintentionally importing repository-wide history.
     /// Returns a complete batch or throws. Caller commits only after every page succeeds.
     public func feedback(in repository: GitHubRepository, pr: Int, excludingAuthor: String? = nil) async throws -> [SourceEvent] {
@@ -106,7 +117,7 @@ public struct GitHubClient: Sendable {
                 // Body hashing catches review edits even when submitted_at does not change.
                 let revisionInput = [comment.updatedAt ?? comment.submittedAt ?? "", body, comment.state ?? ""].joined(separator: "\n")
                 let revision = SHA256.hash(data: Data(revisionInput.utf8)).map { String(format: "%02x", $0) }.joined()
-                let context = [comment.user.map { "Author: \($0.login)" }, comment.path.map { "File: \($0)" }, comment.line.map { "Line: \($0)" }, comment.state.map { "Review state: \($0)" }].compactMap { $0 }.joined(separator: "\n")
+                let context = [comment.user.map { "Author: \($0.login)" }, comment.path.map { "File: \($0)" }, comment.line.map { "Line: \($0)" }, comment.state.map { "Review state: \($0)" }, comment.commitID.map { "Comment commit: \($0)" }, comment.originalCommitID.map { "Original comment commit: \($0)" }, comment.diffHunk.map { "Quoted diff:\n" + String($0.prefix(8000)) }].compactMap { $0 }.joined(separator: "\n")
                 return SourceEvent(integration: "github", sourceID: "\(repository.slug.lowercased()):\(kind):\(comment.id)", revision: revision,
                                    associationKey: repository.associationKey(pr: pr), body: context.isEmpty ? body : "\(context)\n\n\(body)", url: comment.htmlURL)
             }
@@ -156,9 +167,13 @@ public struct GitHubClient: Sendable {
         let path: String?
         let line: Int?
         let state: String?
+        let commitID: String?
+        let originalCommitID: String?
+        let diffHunk: String?
 
         enum CodingKeys: String, CodingKey {
             case id, body, user, path, line, state
+            case commitID = "commit_id", originalCommitID = "original_commit_id", diffHunk = "diff_hunk"
             case htmlURL = "html_url", updatedAt = "updated_at", submittedAt = "submitted_at"
         }
     }

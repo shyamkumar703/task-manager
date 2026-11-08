@@ -22,7 +22,7 @@ enum TaskInfoPresentation {
         else if let key = task.sourceKey { origin = "Created with source association: \(key)\nThe creation mechanism was not recorded." }
         else { origin = "Created locally (TUI or CLI); no source creation decision was recorded." }
         var result = [TaskInfoSection(title: "STARTED", text: "\(task.createdAt)\n\(origin)"), TaskInfoSection(title: "GOAL", text: task.goal)]
-        var runtime = "ID: \(task.id)\nStatus: \(task.status.rawValue)\nUpdated: \(task.updatedAt)"
+        var runtime = "ID: \(task.id)\nStatus: \(task.status == .completed ? "Ready for follow-up (latest scope finished)" : task.status.rawValue)\nUpdated: \(task.updatedAt)"
         if let session = info.session {
             runtime += "\n" + "Project: \(session.repository)\nWorker: \(session.kind.rawValue) / \(session.purpose.rawValue)"
             if let path = session.workspace { runtime += "\nWorktree: \(path)" }
@@ -36,6 +36,9 @@ enum TaskInfoPresentation {
             let delivery = !sameTask ? "Previously linked; now associated with another child" : source.messageDelivered.map { $0 ? "Accepted by child" : "Queued; not yet accepted" } ?? "Not forwarded (\(source.disposition.rawValue))"
             var body = "\(delivery)\n\(source.url)\nSource ID: \(source.sourceID)\nAssociation: \(source.associationKey)\n\n\(source.body)"
             if let reason = source.reason { body += "\n\nLatest routing decision: \(reason)" }
+            if let context = source.githubContext {
+                body += "\n\nPR context: \(context.repository) #\(context.pullRequest)\nHead branch: \(context.headBranch) @ \(context.headSHA)\nCheckout: \(context.checkout ?? "Not locally checked out")\nOwning task: \(context.owningTaskID ?? "Unassigned")"
+            }
             if let context = source.slackContext {
                 body += "\n\nContext: \(context.workspaceName) / #\(context.channelName)\nTopic: \(context.topic ?? "—")\nPurpose: \(context.purpose ?? "—")"
                 for (label, messages) in [("Preceding channel messages", context.precedingMessages), ("Thread messages", context.threadMessages)] where !messages.isEmpty {

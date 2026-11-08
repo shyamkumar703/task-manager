@@ -464,7 +464,7 @@ public final class TaskManagerTUI {
 
     // MARK: - Rendering
     private func taskStatus(_ status: TaskStatus) -> String {
-        status == .waitingForUser ? "Waiting for your answer" : status.rawValue.capitalized
+        status == .waitingForUser ? "Waiting for your answer" : status == .completed ? "Ready for follow-up" : status.rawValue.capitalized
     }
     private func sourceStatus(_ status: SourceDisposition) -> String {
         switch status {
@@ -578,6 +578,9 @@ public final class TaskManagerTUI {
         if let error = source.lastError { lines += section("REVIEW ERROR", error, width: width, style: 6) }
         lines += section("INCOMING MESSAGE", source.body, width: width)
         if let reason = source.reason { lines += section("DECISION", reason, width: width) }
+        if let c = source.githubContext {
+            lines += section("PR CONTEXT", "\(c.repository) #\(c.pullRequest)\nBranch: \(c.headBranch)\nPublished head: \(c.headSHA)\nCheckout: \(c.checkout ?? "No matching local checkout")\nOwning task: \(c.owningTaskID ?? "Not yet associated")", width: width, style: 3)
+        }
         if let c = source.slackContext {
             let context = "\(c.workspaceName) / #\(c.channelName)\nTopic: \(c.topic ?? "—")\nPurpose: \(c.purpose ?? "—")\n\(c.precedingMessages.count) preceding messages · \(c.threadMessages.count) thread messages · \(c.projectHistory.count) prior project decisions"
             lines += section("CONTEXT USED", context, width: width, style: 3)
@@ -593,7 +596,7 @@ public final class TaskManagerTUI {
         case .waitingForUser: commands = "Enter / a: answer   x: ignore   i: independent investigation"
         case .failed: commands = "r: retry review   x: ignore"
         case .ignored: commands = "u: reconsider ignored message   i: independent investigation"
-        case .routed, .created: commands = "Enter: child   i: independent default-branch investigation"
+        case .routed, .created: commands = "Enter: child   i: independent investigation"
         default: commands = "x: ignore   l: inspect message"
         }
         return Detail(title: "\(source.integration.capitalized) message #\(source.id)", subtitle: "\(sourceStatus(source.disposition)) · \(source.slackContext.map { "Slack / #" + $0.channelName } ?? (destination(source.url) == source.url ? source.integration.capitalized : destination(source.url)))", commands: commands, lines: lines)

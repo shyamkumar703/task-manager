@@ -259,7 +259,7 @@ struct TaskManagerCLI {
       slack-poll SOURCE_ID                  Poll a configured Slack conversation once
       source-answer EVENT_ID TEXT           Answer master clarification
       source-retry EVENT_ID                  Retry failed triage
-      source-investigate EVENT_ID           Start independent default-branch exploration
+      source-investigate EVENT_ID           Start independent source-context exploration
       source-unignore EVENT_ID              Reconsider an ignored event through master triage
       source-ignore EVENT_ID                Ignore a pending source event
       init                                  Initialize durable local state
