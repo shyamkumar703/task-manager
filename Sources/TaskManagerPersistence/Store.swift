@@ -115,7 +115,7 @@ public actor Store {
         }
     }
 
-    /// Store an entire fetched page atomically. A future adapter can advance its cursor in this transaction.
+    /// Store a complete fetched batch atomically.
     @discardableResult public func ingest(_ events: [SourceEvent], repository: String? = nil, workerKind: WorkerKind = .codex) throws -> Int {
         let scope = try repository.map { try sourceRepository($0) }
         for event in events {
@@ -124,28 +124,33 @@ public actor Store {
                 try requireText(value, name: name)
             }
         }
-        return try db.transaction {
-            var inserted = 0
-            for event in events {
-                try db.execute("""
-                    INSERT INTO events(integration, source_id, revision, association_key, body, url)
-                    VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(integration, source_id, revision) DO NOTHING
-                    """, [event.integration, event.sourceID, event.revision, event.associationKey, event.body, event.url])
-                if db.changes == 1 {
-                    inserted += 1
-                    try log(taskID: nil, kind: "event.ingested", detail: "\(event.integration):\(event.sourceID):\(event.revision)")
+        return try db.transaction { try ingestBatch(events, scope: scope, workerKind: workerKind) }
+    }
+
+    func ingestBatch(_ events: [SourceEvent], scope: String?, workerKind: WorkerKind, baseline: Bool = false) throws -> Int {
+        var inserted = 0
+        for event in events {
+            try db.execute("""
+                INSERT INTO events(integration, source_id, revision, association_key, body, url)
+                VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(integration, source_id, revision) DO NOTHING
+                """, [event.integration, event.sourceID, event.revision, event.associationKey, event.body, event.url])
+            if db.changes == 1 {
+                if baseline {
+                    try db.execute("UPDATE events SET disposition = 'ignored' WHERE id = ?", [String(db.lastID)])
                 }
-                if let scope {
-                    let row = try db.query("SELECT id FROM events WHERE integration = ? AND source_id = ? AND revision = ?", [event.integration, event.sourceID, event.revision]).first!
-                    let id = row["id"]!
-                    if let existing = try db.query("SELECT repository FROM event_context WHERE event_id = ?", [id]).first {
-                        guard existing["repository"] == scope else { throw ManagerError.conflict("Source event is already scoped to another repository") }
-                    }
-                    try db.execute("INSERT INTO event_context(event_id, repository, worker_kind) VALUES (?, ?, ?) ON CONFLICT(event_id) DO NOTHING", [id, scope, workerKind.rawValue])
-                }
+                inserted += 1
+                try log(taskID: nil, kind: "event.ingested", detail: "\(event.integration):\(event.sourceID):\(event.revision)")
             }
-            return inserted
+            if let scope {
+                let row = try db.query("SELECT id FROM events WHERE integration = ? AND source_id = ? AND revision = ?", [event.integration, event.sourceID, event.revision]).first!
+                let id = row["id"]!
+                if let existing = try db.query("SELECT repository FROM event_context WHERE event_id = ?", [id]).first {
+                    guard existing["repository"] == scope else { throw ManagerError.conflict("Source event is already scoped to another repository") }
+                }
+                try db.execute("INSERT INTO event_context(event_id, repository, worker_kind) VALUES (?, ?, ?) ON CONFLICT(event_id) DO NOTHING", [id, scope, workerKind.rawValue])
+            }
         }
+        return inserted
     }
 
     public func pendingEventCount() throws -> Int {

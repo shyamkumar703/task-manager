@@ -187,3 +187,17 @@ This starts an app-server, performs the initialization handshake, prints the ser
 `propose-comment TASK_ID PR_URL HEAD TEXT`, `proposals`, and `decide PROPOSAL_ID approve|reject` exercise immutable proposal payloads and one-time decisions. These commands **never publish**: no external write executor exists yet. Approval records are not a substitute for runtime sandbox isolation, remote-head revalidation, or recovery of ambiguous external operations; those must be implemented before publication is enabled.
 
 SQLite uses WAL, foreign keys, explicit migrations, and full synchronous durability. State and journal updates share transactions. For a consistent development backup while no process is using the database, copy the entire state directory including any WAL files. A supported online backup command will be added with the coordinator.
+
+### Durable GitHub polling cursor
+
+Poll one PR using the same state directory as the TUI:
+
+```sh
+.build/debug/task-manager --state-dir .state/dev github-poll OWNER/REPO PR /absolute/path/to/local/repository
+```
+
+The first successful poll baselines existing issue comments, inline comments, and reviews as ignored history, without creating work. Subsequent calls queue new or edited feedback for the existing master triage pipeline. Already imported events retain their prior state. Run the coordinator/TUI to process queued feedback.
+
+SQLite saves the cursor generation and all fetched events together. Failed fetches, incomplete pagination, and failed transactions leave the cursor unchanged. Restarting with the same state directory resumes from persisted history; repeated revisions cannot duplicate work. Concurrent stale polls must fetch again. Each PR is bound to one local repository and worker kind per state directory.
+
+Each poll re-fetches the complete PR feedback snapshot and uses revision hashes to detect changes, including edited reviews whose submission timestamp stays unchanged. The cursor records successful generations rather than an API `since` timestamp. This currently runs once per command; recurring background scheduling and TUI source configuration are not implemented yet. `github-import` remains a separate manual history import.
