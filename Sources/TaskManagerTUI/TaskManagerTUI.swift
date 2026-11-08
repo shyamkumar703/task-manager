@@ -87,6 +87,7 @@ public final class TaskManagerTUI {
     private var session: AgentSessionRecord?
     private var outputs: [AgentOutput] = []
     private var messages: [TaskMessage] = []
+    private var cleanupPlan: WorktreeCleanup.Plan?
     private var taskInfoMode = false
     private var taskInfo: TaskInfo?
     private var replySource: IncomingSource?
@@ -193,6 +194,17 @@ public final class TaskManagerTUI {
 
     private func handle(_ key: Int32) async throws {
         if let composer { try await edit(key, composer: composer); return }
+        if let plan = cleanupPlan {
+            if key == 27 || key == 110 { cleanupPlan = nil; notice = "Cleanup cancelled"; return }
+            if key == 121, plan.blockers.isEmpty {
+                cleanupPlan = nil; notice = "Cleaning up worktree…"; draw()
+                try await WorktreeCleanup.execute(plan, store: store, stateDirectory: stateDirectory)
+                notice = "Cleanup complete. Task archived; branch and history retained."; try await reload()
+            }
+            if key == 113 || key == 3 { running = false }
+            _ = navigation.handle(key, dashboard: false); navigation.focus = .detail
+            return
+        }
         if help {
             if key == 63 || key == 27 { help = false; navigation = savedNavigation ?? navigation; savedNavigation = nil; return }
             if let intent = navigation.handle(key, dashboard: page == .home) {
@@ -355,6 +367,10 @@ public final class TaskManagerTUI {
         case 120:
             guard task.status.canTransition(to: .cancelled) else { notice = "This task is already finished; d removes it from the list."; return }
             try await store.transition(task.id, to: .cancelled); notice = "Task cancelled"; try await reload()
+        case 67:
+            notice = "Checking worktree, commits, and shared ownership…"; draw()
+            cleanupPlan = try await WorktreeCleanup.preview(store: store, taskID: task.id, stateDirectory: stateDirectory)
+            navigation.focus = .detail; navigation.viewport = DetailViewport()
         case 111: try await openWorkspace(task.id)
         case 116: try await openTerminal(task.id)
         default: break
@@ -483,6 +499,10 @@ public final class TaskManagerTUI {
     }
     private func time(_ value: Double?) -> String { value.map { Date(timeIntervalSince1970: $0).formatted(date: .omitted, time: .standard) } ?? "not yet" }
     private func detail(width: Int) -> Detail {
+        if let plan = cleanupPlan {
+            let blocked = !plan.blockers.isEmpty
+            return Detail(title: blocked ? "Cleanup needs attention" : "Clean up this task?", subtitle: plan.taskID, commands: blocked ? "Esc / n: return" : "y: confirm cleanup   Esc / n: cancel", lines: section("CLEANUP PREVIEW", plan.summary, width: width) + (blocked ? section("BLOCKED", plan.blockers.joined(separator: "\n\n"), width: width, style: 4) : section("CONFIRM", "Press y to perform this cleanup and archive the task.", width: width, style: 4)))
+        }
         if help { return helpDetail(width: width) }
         switch page {
         case .home:
@@ -547,7 +567,7 @@ public final class TaskManagerTUI {
         let role = session?.purpose.rawValue ?? "implementation"
         if taskInfoMode, navigation.detailSource == .work, let info = taskInfo, info.task.id == task.id {
             let lines = TaskInfoPresentation.sections(info).flatMap { section($0.title, $0.text, width: width, style: $0.style) }
-            return Detail(title: "Task info · " + single(task.goal), subtitle: "\(taskStatus(task.status)) · \(info.sources.count) connection messages · \(info.journal.count) recorded events", commands: "i / Esc: progress   o: tmux workspace   m: message   j/k · Ctrl-U/D · gg/G: scroll", lines: lines)
+            return Detail(title: "Task info · " + single(task.goal), subtitle: "\(taskStatus(task.status)) · \(info.sources.count) connection messages · \(info.journal.count) recorded events", commands: "i / Esc: progress   C: cleanup   o: tmux workspace   m: message   j/k · Ctrl-U/D · gg/G: scroll", lines: lines)
         }
         var lines: [Line] = []
         if ![TaskStatus.cancelled, .completed, .failed].contains(task.status), let q = questions.first(where: { $0.taskID == task.id && $0.answer == nil }) { lines += section("ANSWER NEEDED · a responds", q.prompt, width: width, style: 4) }
@@ -563,6 +583,7 @@ public final class TaskManagerTUI {
         }
         if outputs.isEmpty { lines += section("STATUS", "Waiting for the coordinator…", width: width, style: 3) }
         var commands: [String] = ["i: task info"]
+        if session?.workspace != nil { commands.append("C: cleanup") }
         if task.status != .cancelled { commands.append("m: message") }
         if ![TaskStatus.cancelled, .completed, .failed].contains(task.status), questions.contains(where: { $0.taskID == task.id && $0.answer == nil }) { commands.append("a: answer") }
         if task.status == .paused || task.status.canTransition(to: .paused) { commands.append(task.status == .paused ? "p: resume" : "p: pause") }
@@ -654,6 +675,7 @@ public final class TaskManagerTUI {
         M           Toggle CODEX / MOCK for new manual tasks
         s           Simulate a source message (Home or Activity)
         i           Task info: origin, connection messages, decision history
+        C           Preview explicit worktree cleanup; y confirms and archives
         o           Open child in tmux: editor, shared Codex, shell
         m / p / t   Message / pause / exclusive terminal for a selected child
         d / x / r   Remove / cancel / retry a selected child

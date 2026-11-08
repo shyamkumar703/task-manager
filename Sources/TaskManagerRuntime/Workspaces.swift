@@ -28,7 +28,10 @@ public struct Workspaces: Sendable {
             }
             return workspace
         }
-        let result = try await runner.run(arguments: ["-C", repository, "worktree", "add", "-b", "task-manager/\(taskID)", workspace, "HEAD"])
+        let branch = "task-manager/\(taskID)"
+        let existingBranch = try await runner.run(arguments: ["-C", repository, "show-ref", "--verify", "--quiet", "refs/heads/" + branch])
+        let arguments = existingBranch.exitCode == 0 ? ["-C", repository, "worktree", "add", workspace, branch] : ["-C", repository, "worktree", "add", "-b", branch, workspace, "HEAD"]
+        let result = try await runner.run(arguments: arguments)
         guard result.exitCode == 0 else { throw ManagerError.invalid("Could not create task worktree. Check the repository has a committed HEAD and branch task-manager/\(taskID) is available.") }
         return workspace
     }

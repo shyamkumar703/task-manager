@@ -29,6 +29,7 @@ extension Store {
         try db.transaction {
             guard let session = try agentSession(taskID: taskID), session.purpose == .exploration,
                   session.workspace == nil || (session.workspace == path && session.baseRef == baseRef && session.baseSHA == baseSHA) else { throw ManagerError.conflict("Exploration snapshot cannot be changed") }
+            guard try !workspaceReserved(path, excluding: taskID) else { throw ManagerError.conflict("The checkout is reserved by another task") }
             try db.execute("UPDATE agent_sessions SET workspace = ?, base_ref = ?, base_sha = ? WHERE task_id = ?", [path, baseRef, baseSHA, taskID])
             try log(taskID: taskID, kind: "exploration.snapshot", detail: "\(baseRef) @ \(baseSHA)")
             if let context {

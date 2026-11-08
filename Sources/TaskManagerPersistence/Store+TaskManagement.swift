@@ -26,7 +26,8 @@ extension Store {
         try db.transaction {
             let current = try task(taskID)
             guard current.archivedAt == nil, current.status == .queued,
-                  let session = try agentSession(taskID: taskID), !session.workerActive, !session.manualActive else { return false }
+                  let session = try agentSession(taskID: taskID), !session.workerActive, !session.manualActive,
+                  try !workspaceReserved(session.workspace, excluding: taskID) else { return false }
             try changeStatus(taskID, to: .running)
             try db.execute("UPDATE agent_sessions SET worker_active = 1 WHERE task_id = ?", [taskID])
             return true
@@ -38,7 +39,8 @@ extension Store {
         try db.transaction {
             let current = try task(taskID)
             guard current.archivedAt == nil, ![.paused, .cancelled].contains(current.status),
-                  let session = try agentSession(taskID: taskID), !session.manualActive else {
+                  let session = try agentSession(taskID: taskID), !session.manualActive,
+                  try !workspaceReserved(session.workspace, excluding: taskID) else {
                 throw ManagerError.conflict("This task is paused, archived, or owned by a manual terminal")
             }
             if current.status == .waitingForUser {
@@ -64,6 +66,7 @@ extension Store {
             guard let session = try agentSession(taskID: taskID), session.kind == .codex, session.workspace != nil else {
                 throw ManagerError.conflict("This task has no worktree yet. Mock tasks do not create worktrees.")
             }
+            guard try !workspaceReserved(session.workspace, excluding: taskID) else { throw ManagerError.conflict("Another task owns this shared checkout") }
             guard !session.manualActive else { throw ManagerError.conflict("A terminal already owns this task. Close it first, or use release-terminal after a crashed terminal.") }
             if [.queued, .running].contains(current.status) { try changeStatus(taskID, to: .paused) }
             try db.execute("UPDATE agent_sessions SET manual_active = 1 WHERE task_id = ?", [taskID])

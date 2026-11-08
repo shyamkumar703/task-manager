@@ -37,6 +37,7 @@ extension Store {
         try db.transaction {
             guard let session = try agentSession(taskID: taskID) else { throw ManagerError.notFound("No agent session") }
             guard session.workspace == nil || session.workspace == path else { throw ManagerError.conflict("Workspace already assigned") }
+            guard try !workspaceReserved(path, excluding: taskID) else { throw ManagerError.conflict("The checkout is reserved by another task") }
             try db.execute("UPDATE agent_sessions SET workspace = ? WHERE task_id = ?", [path, taskID])
             try log(taskID: taskID, kind: "workspace.assigned", detail: path)
         }

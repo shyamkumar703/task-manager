@@ -57,6 +57,7 @@ The home dashboard places **Needs you** above the work list, with the selected i
 | `i` on Home | Task info: origin, connection messages, and recorded decisions; `i` / Esc returns to progress |
 | `o` on work | Open the task’s tmux workspace: Neovim, the same live Codex child, and a shell |
 | `m` / `p` / `t` on work | Message / pause or resume / worktree terminal |
+| `C` on work | Preview explicit worktree cleanup; `y` confirms, Esc cancels |
 | `r` / `d` / `x` on work | Retry or continue / remove / cancel, when available |
 | `s` | Simulate an incoming source message on Home or Activity |
 | `?` | Full keyboard guide |
@@ -87,6 +88,10 @@ Shared servers remain available while a task's tmux session exists. Idle servers
 Press `t` to use that worktree directly. An active worker pauses and releases ownership before your configured interactive shell opens in the existing terminal. Run `git status`, commit, or push manually there. `exit` returns to the TUI; press `p` if you want a paused child to continue. The terminal also shows the command to resume its saved Codex conversation interactively. Mock tasks have no worktree terminal.
 
 The shell exports `TASK_MANAGER_TASK_ID`, `TASK_MANAGER_WORKTREE`, and `TASK_MANAGER_CODEX_THREAD_ID`. Its durable manual-ownership reservation prevents a coordinator from restarting the worker while the shell is open, even if another UI queues it. After a crashed shell, close any remaining manual session before clearing the reservation with `release-terminal TASK_ID`.
+
+Press **`C`** (uppercase) on a task in Work to preview cleanup, then **`y`** to confirm or **Esc** to cancel. Cleanup removes an owned, clean managed worktree and archives the task. Its branch, Codex thread, source messages, and transaction history are retained. Restoring and continuing an implementation task recreates its checkout from that preserved branch.
+
+Pause active work and close the task's tmux session or exclusive terminal first. Cleanup blocks on uncommitted, untracked, or ignored files, commits not covered by locally known remote refs, changed task branches, and other tasks referencing the checkout. Borrowed checkouts (for example, PR exploration sharing an implementation worktree) are never deleted: cleanup releases that task's reference and archives it, after which the owner can be cleaned up. There is no force-delete option or automatic cleanup. Checks run again after confirmation under a durable ownership reservation. If a crashed cleanup left a reservation, use `release-terminal TASK_ID` after ensuring the old operation has stopped; `C` can reconcile metadata if the directory is already absent. If a task was archived earlier, restore it first to select it for cleanup.
 
 Press `d` to archive a task. Unlike cancellation, this removes it from the work list across restarts. Child questions stop appearing in Needs you; outstanding reply actions can still be reviewed or dismissed. Active work is paused; its database record, conversation, pending questions, branch, and worktree remain. Incoming feedback cannot reactivate an archived task. Use these CLI commands to inspect or restore it:
 
