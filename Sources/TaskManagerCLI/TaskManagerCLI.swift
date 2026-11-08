@@ -62,8 +62,16 @@ struct TaskManagerCLI {
         case "slack-connect":
             try count(0)
             let token = try await SlackConnection.promptToken()
-            let info = try await SlackConnection.connect(token: token, stateDirectory: statePath)
-            print("Connected Slack workspace \(info.workspaceName) (\(info.workspaceID)), user \(info.userID). Token saved in macOS Keychain. Slack message polling is not enabled yet.")
+            do {
+                let info = try await SlackConnection.connect(token: token, stateDirectory: statePath)
+                let message = "Connected to \(info.workspaceName). Your token is saved in macOS Keychain. Slack message polling is not enabled yet."
+                print(message)
+                fflush(stdout)
+                await SlackConnection.showResult(title: "Slack connected", message: message)
+            } catch {
+                await SlackConnection.showResult(title: "Slack connection failed", message: String(describing: error))
+                throw error
+            }
         case "serve":
             try count(0)
             try await Daemon.serve(stateDirectory: statePath)
