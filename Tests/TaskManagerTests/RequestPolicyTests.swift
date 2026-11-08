@@ -10,7 +10,10 @@ private struct StatusEvidenceAPI: GitHubHTTPTransport {
     func get(_ request: URLRequest) throws -> HTTPResponse {
         let path = request.url!.path
         let json: String
-        if path == "/repos/o/r/pulls/5" {
+        if path == "/repos/o/r/pulls" {
+            if request.url?.query?.contains("state=closed") == true { json = "[]" }
+            else { json = #"[{"number":3,"title":"Add Swift todo CLI with remove command","user":{"login":"o"},"head":{"ref":"legacy-cli","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},{"number":4,"title":"Add due dates and colored listing","user":{"login":"o"},"head":{"ref":"due-dates","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},{"number":5,"title":"Add remove subcommand for deleting todos","user":{"login":"o"},"head":{"ref":"feature-remove","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]"# }
+        } else if path == "/repos/o/r/pulls/5" {
             json = #"{"number":5,"title":"Remove command","user":{"login":"o"},"head":{"ref":"feature-remove","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","repo":{"full_name":"o/r"}},"state":"closed","merged":true,"merged_at":"2026-11-08T12:00:00Z","html_url":"https://github.com/o/r/pull/5"}"#
         } else if path.hasSuffix("/reviews") {
             json = #"[{"id":1,"body":"","state":"APPROVED","html_url":"https://github.com/o/r/pull/5#review-1","commit_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]"#
@@ -178,4 +181,78 @@ func liveMasterPassesPRFromTaskHistoryIntoGenericStatusInvestigation() async thr
     #expect(decision.action == .investigate)
     #expect(decision.inspectionScope == "status")
     #expect(decision.pullRequestNumber == 5)
+}
+
+private actor DiscoverySelector: PRSelecting {
+    let choice: Int?
+    var calls = 0
+    init(choice: Int?) { self.choice = choice }
+    func select(source: IncomingSource, goal: String?, tasks: [TriageCandidate], pulls: [GitHubPullRequest]) -> PRSelection {
+        calls += 1
+        #expect(!source.body.contains("#5") && !(goal ?? "").contains("#5"))
+        #expect(pulls.map(\.number) == [3, 4, 5])
+        return PRSelection(number: choice, reason: choice == nil ? "Several candidates remain equally plausible" : "The deletion task's feature-remove branch matches the PR head")
+    }
+}
+
+@Test func genericStatusDiscoversOpenPRBeforeAskingAndUsesArchivedTaskHistory() async throws {
+    let (root, repo) = try await policyRepository(); defer { try? FileManager.default.removeItem(atPath: root) }
+    let store = try Store(path: root + "/state.sqlite")
+    let owner = try await store.createAgentTask(goal: "Add support for deleting todos", repository: repo, kind: .mock)
+    try await store.archive(owner.id)
+    let id = try await store.injectSource(body: "where are we with the delete command work", repository: repo)
+    _ = try await store.claimTriageEvent()
+    try await store.applyTriage(eventID: id, decision: .init(action: .investigate, goal: "Determine the current status of the todo deletion work using fresh GitHub evidence", reason: "Status request", inspectionScope: "status"))
+    let taskID = try #require(await store.source(id).taskID)
+    let selector = DiscoverySelector(choice: 5)
+    let resolver = GitHubContextResolver(client: try GitHubClient(transport: StatusEvidenceAPI()), selector: selector)
+    let agent = EvidenceAgent()
+    let coordinator = Coordinator(store: store, stateDirectory: root, githubResolver: resolver, factory: { agent })
+    try await coordinator.tick()
+    for _ in 0..<400 {
+        if try await store.task(taskID).status == .completed { break }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(try await store.task(taskID).status == .completed)
+    #expect(try await store.questions().isEmpty)
+    #expect(await selector.calls == 1)
+    #expect(try await store.source(id).githubContext?.pullRequest == 5)
+    #expect(try await store.journal().contains { $0.taskID == taskID && $0.kind == "exploration.github.discovered" })
+    #expect(try await store.triageCandidates(repository: repo).allSatisfy { $0.id != owner.id })
+    #expect(try await store.triageCandidates(repository: repo, includeArchived: true).contains { $0.id == owner.id })
+    await coordinator.shutdown()
+}
+
+@Test func ambiguousDiscoveryExplainsWhatWasCheckedBeforeRequestingClarification() async throws {
+    let (root, repo) = try await policyRepository(); defer { try? FileManager.default.removeItem(atPath: root) }
+    let store = try Store(path: root + "/state.sqlite")
+    let id = try await store.injectSource(body: "where are we with the work", repository: repo)
+    let source = try await store.source(id)
+    let selector = DiscoverySelector(choice: nil)
+    let resolver = GitHubContextResolver(client: try GitHubClient(transport: StatusEvidenceAPI()), selector: selector)
+    do {
+        _ = try await resolver.resolve(source: source, candidates: [], investigationGoal: "Check current work status", discoverPullRequest: true)
+        Issue.record("Expected ambiguity after discovery")
+    } catch let question as InspectionContextQuestion {
+        #expect(question.prompt.contains("I checked o/r"))
+        #expect(question.prompt.contains("#3") && question.prompt.contains("#5"))
+        #expect(question.prompt.contains("equally plausible"))
+        #expect(await selector.calls == 1)
+    }
+}
+
+@Test(.enabled(if: ProcessInfo.processInfo.environment["TASK_MANAGER_LIVE_REQUEST_POLICY"] == "1"))
+func liveDiscoverySelectsDeletionPRFromOpenListAndTaskBranchWithoutANumberHint() async throws {
+    let (root, repo) = try await policyRepository(); defer { try? FileManager.default.removeItem(atPath: root) }
+    let store = try Store(path: root + "/state.sqlite")
+    let owner = try await store.createAgentTask(goal: "Add support for deleting todos", repository: repo, kind: .mock)
+    try await store.writeOutput(taskID: owner.id, itemID: "branch", kind: "assistant", text: "Deletion implementation is on feature-remove. The command is todo remove <id>, without a delete alias.")
+    try await store.archive(owner.id)
+    let id = try await store.injectSource(body: "where are we with the delete command work", repository: repo)
+    let source = try await store.source(id)
+    let resolver = GitHubContextResolver(client: try GitHubClient(transport: StatusEvidenceAPI()))
+    let context = try #require(await resolver.resolve(source: source, candidates: store.triageCandidates(repository: repo, includeArchived: true), includeEvidence: true, investigationGoal: "Determine current status of todo deletion work", discoverPullRequest: true))
+    #expect(context.pullRequest == 5)
+    #expect(context.discoveryReason?.contains("3 open PRs") == true)
+    #expect(context.liveEvidence?.contains("Merged: true") == true)
 }

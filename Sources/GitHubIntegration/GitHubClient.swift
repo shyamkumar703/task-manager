@@ -60,6 +60,8 @@ public struct GitHubPullRequest: Codable, Sendable {
     }
     public let number: Int
     public let title: String
+    public let body: String?
+    public let updated_at: String?
     public let user: User
     public let head: Head
     public let state: String?
@@ -99,6 +101,13 @@ public struct GitHubClient: Sendable {
         try requireText(author, name: "GitHub author")
         let pulls: [GitHubPullRequest] = try await pages(path: "/repos/\(repository.slug)/pulls", query: [URLQueryItem(name: "state", value: "open")])
         return pulls.filter { $0.user.login.caseInsensitiveCompare(author) == .orderedSame }
+    }
+
+    /// Bounded discovery before asking the user to identify a PR.
+    public func recentPullRequests(in repository: GitHubRepository, state: String = "open") async throws -> [GitHubPullRequest] {
+        guard ["open", "closed"].contains(state) else { throw ManagerError.invalid("Invalid discovery PR state") }
+        let result = try await response(path: "/repos/\(repository.slug)/pulls", query: [URLQueryItem(name: "state", value: state), URLQueryItem(name: "sort", value: "updated"), URLQueryItem(name: "direction", value: "desc"), URLQueryItem(name: "per_page", value: "50"), URLQueryItem(name: "page", value: "1")])
+        return try JSONDecoder().decode([GitHubPullRequest].self, from: result.data)
     }
 
     public func pullRequest(in repository: GitHubRepository, number: Int) async throws -> GitHubPullRequest {

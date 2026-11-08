@@ -102,8 +102,12 @@ public actor Coordinator {
             if session.purpose == .exploration, let source = try await store.sources(taskID: id).first(where: { $0.disposition == .created }) {
                 let selectedPR = try await store.output(taskID: id, itemID: "inspection-pr").flatMap { Int($0.text) }
                 let investigationGoal = try await store.task(id).goal
-                if let context = try await githubResolver.resolve(source: source, candidates: [], refresh: true, includeEvidence: true, selectedPR: selectedPR, investigationGoal: investigationGoal) {
+                let statusInvestigation = try await store.output(taskID: id, itemID: "inspection-scope")?.text == "status"
+                let history = statusInvestigation ? try await store.triageCandidates(repository: session.repository, includeArchived: true).filter { $0.id != id && $0.purpose == .implementation } : []
+                if statusInvestigation { try await store.record(taskID: id, kind: "exploration.github.discovery.started", detail: "Checking PR context, project origin, open PRs, recent closed PRs if needed, and implementation history before asking the user") }
+                if let context = try await githubResolver.resolve(source: source, candidates: history, refresh: true, includeEvidence: true, selectedPR: selectedPR, investigationGoal: investigationGoal, discoverPullRequest: statusInvestigation) {
                     explorationSource = try await store.refreshGitHubEvidence(eventID: source.id, context: context)
+                    if let reason = context.discoveryReason { try await store.record(taskID: id, kind: "exploration.github.discovered", detail: reason) }
                     try await store.writeOutput(taskID: id, itemID: "github-evidence", kind: "system", text: "Live GitHub evidence at \(context.checkedAt ?? "unknown time")\n" + (context.liveEvidence ?? "Unavailable"))
                     try await store.record(taskID: id, kind: "exploration.github.checked", detail: "\(context.repository) PR #\(context.pullRequest) at \(context.checkedAt ?? "unknown time")")
                 } else { explorationSource = source }

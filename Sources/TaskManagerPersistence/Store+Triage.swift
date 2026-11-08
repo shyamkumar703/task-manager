@@ -155,15 +155,15 @@ extension Store {
         }
     }
 
-    public func triageCandidates(repository: String) throws -> [TriageCandidate] {
+    public func triageCandidates(repository: String, includeArchived: Bool = false) throws -> [TriageCandidate] {
         let scope = repository.isEmpty ? "" : try sourceRepository(repository)
         let rows = try db.query("""
             SELECT t.id FROM tasks t JOIN agent_sessions s ON s.task_id = t.id
-            WHERE (? = '' OR s.repository = ?) AND t.archived_at IS NULL AND t.status != 'cancelled'
+            WHERE (? = '' OR s.repository = ?) AND (? = '1' OR t.archived_at IS NULL) AND t.status != 'cancelled'
             ORDER BY t.updated_at DESC, t.id LIMIT 65
-            """, [scope, scope])
-        guard rows.count <= 64 else { throw ManagerError.invalid("Too many tasks for one triage context; narrow the repository's active task list") }
-        return try rows.map { row in
+            """, [scope, scope, includeArchived ? "1" : "0"])
+        guard includeArchived || rows.count <= 64 else { throw ManagerError.invalid("Too many tasks for one triage context; narrow the repository's active task list") }
+        return try rows.prefix(64).map { row in
             let task = try task(row["id"]!)
             let recent = try db.query("SELECT kind, text FROM agent_output WHERE task_id = ? AND kind IN ('assistant','user') ORDER BY sequence DESC LIMIT 4", [task.id]).reversed().map {
                 "\($0["kind"]!): \(String($0["text"]!.prefix(1500)))"
@@ -174,7 +174,7 @@ extension Store {
             let instructions = try db.query("SELECT body FROM messages WHERE task_id = ? ORDER BY sequence DESC LIMIT 8", [task.id]).reversed().map {
                 "Task inbox (source data includes separately labeled user clarification): " + String($0["body"]!.prefix(4000))
             }
-            return TriageCandidate(id: task.id, goal: String(task.goal.prefix(4096)), status: task.status, repository: try agentSession(taskID: task.id)!.repository, recentContext: resolutions + instructions + recent, purpose: try agentSession(taskID: task.id)!.purpose, workspace: try agentSession(taskID: task.id)!.workspace)
+            return TriageCandidate(id: task.id, goal: String(task.goal.prefix(4096)), status: task.status, repository: try agentSession(taskID: task.id)!.repository, recentContext: ["Task created: \(task.createdAt); last updated: \(task.updatedAt); archived: \(task.archivedAt ?? "no")"] + resolutions + instructions + recent, purpose: try agentSession(taskID: task.id)!.purpose, workspace: try agentSession(taskID: task.id)!.workspace)
         }
     }
 

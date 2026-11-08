@@ -9,7 +9,8 @@ public struct InspectionContextQuestion: Error, Sendable {
 
 public struct GitHubContextResolver: Sendable {
     private let client: GitHubClient?
-    public init(client: GitHubClient? = nil) { self.client = client }
+    private let selector: any PRSelecting
+    public init(client: GitHubClient? = nil, selector: any PRSelecting = CodexPRSelector()) { self.client = client; self.selector = selector }
 
     public static func pullRequest(in source: IncomingSource) throws -> (GitHubRepository, Int)? {
         let fields = source.associationKey.split(separator: ":")
@@ -30,9 +31,10 @@ public struct GitHubContextResolver: Sendable {
         return found.values.first
     }
 
-    public func resolve(source: IncomingSource, candidates: [TriageCandidate], refresh: Bool = false, includeEvidence: Bool = false, selectedPR: Int? = nil, investigationGoal: String? = nil) async throws -> GitHubRoutingContext? {
+    public func resolve(source: IncomingSource, candidates: [TriageCandidate], refresh: Bool = false, includeEvidence: Bool = false, selectedPR: Int? = nil, investigationGoal: String? = nil, discoverPullRequest: Bool = false) async throws -> GitHubRoutingContext? {
         if let saved = source.githubContext, !refresh { return saved }
         let location: (GitHubRepository, Int)?
+        var discoveryReason = source.githubContext?.discoveryReason
         if let saved = source.githubContext { location = (try GitHubRepository(saved.repository), saved.pullRequest) }
         else if let direct = try Self.pullRequest(in: source) { location = direct }
         else if let number = try selectedPR ?? Self.referencedNumber(in: source, investigationGoal: investigationGoal) {
@@ -44,6 +46,25 @@ public struct GitHubContextResolver: Sendable {
             if repositories.count > 1, source.repository.isEmpty { return nil } // Master first resolves the project from conversation context.
             if repositories.isEmpty, source.repository.isEmpty { return nil }
             guard let repository = repositories.values.first else { throw InspectionContextQuestion("PR #\(number) is mentioned, but its GitHub repository could not be identified. Which repository is it in?") }
+            location = (repository, number)
+        } else if discoverPullRequest, !source.repository.isEmpty {
+            guard let remote = try await Self.git(source.repository, ["remote", "get-url", "origin"]), let repository = GitHubDiscovery.repository(remote: remote) else {
+                throw InspectionContextQuestion("I inspected the project's origin but could not identify its GitHub repository. Which repository should be checked?")
+            }
+            let client = try client ?? GitHubClient()
+            let open = try await client.recentPullRequests(in: repository)
+            var selection = open.isEmpty ? PRSelection(number: nil, reason: "No open PRs were found") : try await selector.select(source: source, goal: investigationGoal, tasks: candidates, pulls: open)
+            var searched = open
+            if selection.number == nil {
+                let closed = try await client.recentPullRequests(in: repository, state: "closed")
+                searched += closed
+                if !closed.isEmpty { selection = try await selector.select(source: source, goal: investigationGoal, tasks: candidates, pulls: searched) }
+            }
+            guard let number = selection.number, searched.contains(where: { $0.number == number }) else {
+                let summary = searched.prefix(12).map { "#\($0.number): \($0.title)" }.joined(separator: "; ")
+                throw InspectionContextQuestion("I checked \(repository.slug)'s recent open and closed PRs and task history. \(selection.reason). Which PR should I use? Candidates: \(summary.isEmpty ? "none found" : summary)")
+            }
+            discoveryReason = "Discovered PR #\(number) after inspecting \(open.count) open PRs and \(searched.count - open.count) recent closed PRs. \(selection.reason)"
             location = (repository, number)
         } else { location = nil }
         guard let (repository, number) = location else { return nil }
@@ -67,7 +88,7 @@ public struct GitHubContextResolver: Sendable {
                   Self.canonical(savedPath) == Self.canonical(checkout.path) else { return nil }
             return saved.owningTaskID
         }
-        return GitHubRoutingContext(repository: repository.slug, pullRequest: number, headBranch: branch, headSHA: pull.head.sha, headRepository: pull.head.repo?.full_name, checkout: checkout?.path, checkoutSHA: checkout?.sha, owningTaskID: owner?.id ?? previousOwner, liveEvidence: includeEvidence ? await client.pullRequestEvidence(in: repository, pull: pull) : nil, checkedAt: ISO8601DateFormatter().string(from: Date()))
+        return GitHubRoutingContext(repository: repository.slug, pullRequest: number, headBranch: branch, headSHA: pull.head.sha, headRepository: pull.head.repo?.full_name, checkout: checkout?.path, checkoutSHA: checkout?.sha, owningTaskID: owner?.id ?? previousOwner, liveEvidence: includeEvidence ? await client.pullRequestEvidence(in: repository, pull: pull) : nil, checkedAt: ISO8601DateFormatter().string(from: Date()), discoveryReason: discoveryReason)
     }
 
     private static func referencedNumber(in source: IncomingSource, investigationGoal: String? = nil) throws -> Int? {
