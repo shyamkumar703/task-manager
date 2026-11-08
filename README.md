@@ -2,7 +2,7 @@
 
 A local autonomous task manager, implemented in Swift. See [SPEC.md](SPEC.md) and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the intended system.
 
-The current implementation supports child workers and source-message triage through a TUI: create tasks, watch progress, send messages during a turn, inject incoming source messages, answer questions, and pause/resume work. A real Codex master decides whether incoming messages affect existing tasks, require new work, need clarification, or can be ignored. A background coordinator owns workers and durable SQLite state. Tasks can use a mock worker or real Codex in an isolated git worktree. GitHub reads are available separately; continuous live-source polling is still to come.
+The current implementation supports child workers and source-message triage through a TUI: create tasks, watch progress, send messages during a turn, inject incoming source messages, answer questions, and pause/resume work. A real Codex master decides whether incoming messages affect existing tasks, require new work, need clarification, or can be ignored. A background coordinator owns workers and durable SQLite state. Tasks can use a mock worker or real Codex in an isolated git worktree. The coordinator automatically polls configured GitHub repositories for feedback on your open PRs.
 
 ## Build and verify
 
@@ -166,9 +166,9 @@ To import all current discussion, inline comments, and submitted review bodies f
 .build/debug/task-manager --state-dir .state github-import OWNER/REPO PR_NUMBER
 ```
 
-Authentication stays in `gh`, which uses your saved login or its supported token environment variables (`GH_TOKEN`/`GITHUB_TOKEN`). The application invokes `gh api --hostname github.com --method GET --include` directly, without a shell or credentials in command arguments. It reads pagination headers and fetches bounded pages rather than delegating unlimited pagination to `gh`. A failed batch is not partially ingested. Rate-limit errors report retry metadata; automatic retry/backoff is not implemented yet. Process timeout/cancellation and bounded stdout prevent hung or oversized responses from stalling the caller; stderr is drained without being persisted.
+Authentication stays in `gh`, which uses your saved login or its supported token environment variables (`GH_TOKEN`/`GITHUB_TOKEN`). The application invokes `gh api --hostname github.com --method GET --include` directly, without a shell or credentials in command arguments. It reads pagination headers and fetches bounded pages rather than delegating unlimited pagination to `gh`. A failed batch is not partially ingested. Repository polling persists failures and retries with exponential backoff, honoring numeric Retry-After and rate-limit reset headers. Process timeout/cancellation and bounded stdout prevent hung or oversized responses from stalling the caller; stderr is drained without being persisted.
 
-Repeated imports deduplicate identical revisions. Established associations to bound child workers are reviewed by the master before delivery; legacy tasks without workers retain explicit-association routing. Unknown associations remain pending for future master triage. This manual command imports history; automatic first-run baselining and continuous polling are still to come.
+Repeated imports deduplicate identical revisions. Established associations to bound child workers are reviewed by the master before delivery; legacy tasks without workers retain explicit-association routing. Unknown associations remain pending for future master triage. This manual command imports history; use repository polling below for automatic discovery and first-run baselining.
 
 The test checkout is `/Users/shyamkumar/Developer/todo_list_task_manager_test`, with remote `shyamkumar703/todo_list_test_task_manager`. Real Codex tasks modify their own worktrees; the mock/fixture tests do not modify application code.
 
@@ -200,4 +200,23 @@ The first successful poll baselines existing issue comments, inline comments, an
 
 SQLite saves the cursor generation and all fetched events together. Failed fetches, incomplete pagination, and failed transactions leave the cursor unchanged. Restarting with the same state directory resumes from persisted history; repeated revisions cannot duplicate work. Concurrent stale polls must fetch again. Each PR is bound to one local repository and worker kind per state directory.
 
-Each poll re-fetches the complete PR feedback snapshot and uses revision hashes to detect changes, including edited reviews whose submission timestamp stays unchanged. The cursor records successful generations rather than an API `since` timestamp. This currently runs once per command; recurring background scheduling and TUI source configuration are not implemented yet. `github-import` remains a separate manual history import.
+Each poll re-fetches the complete PR feedback snapshot and uses revision hashes to detect changes, including edited reviews whose submission timestamp stays unchanged. The cursor records successful generations rather than an API `since` timestamp. `github-poll` runs once; the repository scheduler below runs automatically. `github-import` remains a separate manual history import.
+
+### Automatic repository polling
+
+Open the TUI and press **`g`** for GitHub repositories. Press **`n`** and enter the GitHub `OWNER/REPO`, absolute local checkout path, your GitHub login, and the polling interval in seconds (10–86400; default 60). Repeat for each repository to observe. Configuration and health are saved in SQLite alongside tasks. Press **`p`** to enable/disable the selected repository, **`e`** for incoming events, or **`g`** to return to tasks. The repository view shows last success, next poll, and errors. Authenticate with `gh auth login` first.
+
+The persistent coordinator discovers your open PRs in each enabled repository and reads their conversation comments, inline comments, and reviews. Polling continues after **`q`** detaches the TUI. Stopping the coordinator stops polling; restarting resumes using saved intervals, baselines, and event revisions. Network fetches run separately from child workers and master triage, with at most two repository polls in flight. Failures in one repository do not stop the others. Failed repository polls preserve successful per-PR commits and retry with saved backoff.
+
+The initial successful repository scan records existing feedback without starting historical work. After that scan, new/edited feedback—including feedback on newly discovered PRs—enters normal triage. Every newly seen PR is baselined while the repository's first scan remains incomplete. Closed/merged PRs are outside the initial discovery scope. Polling uses read-only GitHub requests; publishing remains a separate approval-controlled action.
+
+Equivalent CLI configuration, using the same state directory as the TUI:
+
+```sh
+.build/debug/task-manager --state-dir .state/dev github-watch OWNER/REPO /absolute/path/to/local/repository YOUR_LOGIN 60
+.build/debug/task-manager --state-dir .state/dev github-sources
+.build/debug/task-manager --state-dir .state/dev github-disable SOURCE_ID
+.build/debug/task-manager --state-dir .state/dev github-enable SOURCE_ID
+```
+
+The coordinator must be running (`tui` starts it, or use `serve`). Each remote repository has one configuration per state directory. Polling is independent of the new-task MOCK/CODEX toggle; automatically created source tasks use Codex.

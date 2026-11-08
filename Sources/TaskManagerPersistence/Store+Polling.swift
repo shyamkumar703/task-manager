@@ -19,7 +19,7 @@ extension Store {
     /// Commit only a complete fetched snapshot. First contact records history without scheduling work.
     /// Revision uniqueness is the event watermark; generation prevents stale concurrent poll commits.
     @discardableResult public func commitPoll(sourceKey: String, repository: String, workerKind: WorkerKind,
-                                             expectedGeneration: Int?, events: [SourceEvent]) throws -> Int {
+                                             expectedGeneration: Int?, events: [SourceEvent], baselineFirst: Bool = true) throws -> Int {
         try requireText(sourceKey, name: "Polling source key")
         let scope = try sourceRepository(repository)
         for event in events {
@@ -30,7 +30,7 @@ extension Store {
         return try db.transaction {
             let cursor = try pollingCursor(sourceKey: sourceKey, repository: scope, workerKind: workerKind)
             guard cursor?.generation == expectedGeneration else { throw ManagerError.conflict("Polling cursor changed; fetch again before committing") }
-            let inserted = try ingestBatch(events, scope: scope, workerKind: workerKind, baseline: cursor == nil)
+            let inserted = try ingestBatch(events, scope: scope, workerKind: workerKind, baseline: cursor == nil && baselineFirst)
             try db.execute("INSERT INTO polling_cursors(source_key, repository, worker_kind, generation, completed_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(source_key) DO UPDATE SET generation = excluded.generation, completed_at = excluded.completed_at",
                            [sourceKey, scope, workerKind.rawValue, String((expectedGeneration ?? 0) + 1), ISO8601DateFormatter().string(from: Date())])
             try log(taskID: nil, kind: cursor == nil ? "source.baselined" : "source.polled", detail: "\(sourceKey): \(inserted) new revisions")

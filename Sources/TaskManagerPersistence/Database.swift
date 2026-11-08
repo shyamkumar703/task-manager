@@ -89,7 +89,7 @@ final class Database {
     private func migrate() throws {
         try transaction {
             let version = try query("PRAGMA user_version").first?["user_version"] ?? "0"
-            guard ["0", "1", "2", "3", "4", "5"].contains(version) else {
+            guard ["0", "1", "2", "3", "4", "5", "6"].contains(version) else {
                 throw ManagerError.storage("Database schema \(version) is newer than this application")
             }
             if version == "0" {
@@ -183,9 +183,13 @@ final class Database {
                     """)
                 try execute("PRAGMA user_version = 4")
             }
-            if version != "5" {
+            if ["0", "1", "2", "3", "4"].contains(version) {
                 try execute("CREATE TABLE IF NOT EXISTS polling_cursors (source_key TEXT PRIMARY KEY, repository TEXT NOT NULL, worker_kind TEXT NOT NULL, generation INTEGER NOT NULL, completed_at TEXT NOT NULL)")
                 try execute("PRAGMA user_version = 5")
+            }
+            if version != "6" {
+                try execute("CREATE TABLE IF NOT EXISTS github_sources (id TEXT PRIMARY KEY, repository TEXT NOT NULL UNIQUE, local_repository TEXT NOT NULL, author TEXT NOT NULL, interval_seconds INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, last_success REAL, next_poll REAL NOT NULL DEFAULT 0, last_error TEXT, failures INTEGER NOT NULL DEFAULT 0)")
+                try execute("PRAGMA user_version = 6")
             }
         }
     }

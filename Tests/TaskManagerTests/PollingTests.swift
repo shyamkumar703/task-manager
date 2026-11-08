@@ -75,3 +75,121 @@ private actor PollTransport: GitHubHTTPTransport {
     }
     #expect(try await store.pollingCursor(sourceKey: repo.associationKey(pr: 1), repository: root.path, workerKind: .codex)?.generation == 1)
 }
+
+private func pollResponse(_ json: String) -> HTTPResponse { HTTPResponse(data: Data(json.utf8), status: 200) }
+private let ownPR = #"{"number":1,"title":"First","user":{"login":"me"},"head":{"sha":"abc"}}"#
+private let newPR = #"{"number":2,"title":"Second","user":{"login":"me"},"head":{"sha":"def"}}"#
+private let foreignPR = #"{"number":9,"title":"Other","user":{"login":"someone"},"head":{"sha":"xyz"}}"#
+private func commentJSON(_ id: Int, _ body: String) -> String {
+    "{\"id\":\(id),\"body\":\"\(body)\",\"html_url\":\"https://github.com/o/r/pull/1\",\"updated_at\":\"v1\"}"
+}
+private func waitForPoll(_ store: Store, _ predicate: (GitHubSource) -> Bool) async throws {
+    for _ in 0..<300 {
+        if let source = try await store.gitHubSources().first, predicate(source) { return }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    throw ManagerError.invalid("Polling did not finish")
+}
+
+@Test func automaticRepositoryPollingDiscoversOwnPRsAndResumesAfterRestart() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let path = root.appendingPathComponent("state.sqlite").path
+    let store = try Store(path: path)
+    let id = try await store.addGitHubSource(repository: "o/r", localRepository: root.path, author: "me", intervalSeconds: 60)
+    let empty = pollResponse("[]")
+    let transport = PollTransport([
+        pollResponse("[\(ownPR),\(foreignPR)]"), pollResponse("[\(commentJSON(1, "old"))]"), empty, empty,
+        pollResponse("[\(ownPR),\(newPR)]"), pollResponse("[\(commentJSON(1, "old")),\(commentJSON(2, "new"))]"), empty, empty,
+        pollResponse("[\(commentJSON(3, "new PR feedback"))]"), empty, empty,
+    ])
+    let scheduler = GitHubPollingScheduler(store: store, client: try GitHubClient(transport: transport))
+    try await scheduler.tick()
+    try await waitForPoll(store) { $0.lastSuccess != nil }
+    #expect(try await store.sources().count == 1)
+    #expect(try await store.pendingEventCount() == 0)
+    let initial = try #require(await store.gitHubSources().first)
+    #expect(initial.nextPoll >= initial.lastSuccess! + 60)
+    await scheduler.shutdown()
+    let reopened = try Store(path: path)
+    let resumed = GitHubPollingScheduler(store: reopened, client: try GitHubClient(transport: transport))
+    // A restart before the due time must not fetch or advance any cursor.
+    try await resumed.tick(now: Date(timeIntervalSince1970: initial.lastSuccess!))
+    #expect(try await reopened.pollingCursor(sourceKey: "github:o/r:pr:1", repository: root.path, workerKind: .codex)?.generation == 1)
+    try await resumed.tick(now: Date(timeIntervalSince1970: initial.nextPoll + 1))
+    try await waitForPoll(reopened) { ($0.lastSuccess ?? 0) > initial.lastSuccess! }
+    #expect(try await reopened.pendingEventCount() == 2)
+    #expect(try await reopened.sources().count == 3)
+    try await reopened.setGitHubSourceEnabled(id, enabled: false)
+    try await resumed.tick(now: .distantFuture)
+    #expect(try await reopened.gitHubSources().first?.enabled == false)
+    #expect(try await reopened.pollingCursor(sourceKey: "github:o/r:pr:1", repository: root.path, workerKind: .codex)?.generation == 2)
+    await resumed.shutdown()
+}
+
+@Test func automaticPollingPersistsFailuresAndHonorsRateLimitBackoff() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try Store(path: root.appendingPathComponent("state.sqlite").path)
+    try await store.addGitHubSource(repository: "o/r", localRepository: root.path, author: "me", intervalSeconds: 10)
+    let retry = Date().timeIntervalSince1970 + 600
+    let transport = PollTransport([HTTPResponse(data: Data(), status: 403, headers: ["x-ratelimit-reset": String(retry)])])
+    let scheduler = GitHubPollingScheduler(store: store, client: try GitHubClient(transport: transport))
+    try await scheduler.tick()
+    try await waitForPoll(store) { $0.failures == 1 }
+    let source = try #require(await store.gitHubSources().first)
+    #expect(source.lastSuccess == nil)
+    #expect(source.lastError?.contains("403") == true)
+    #expect(source.nextPoll >= retry)
+    #expect(try await store.sources().isEmpty)
+    try await scheduler.tick()
+    #expect(try await store.gitHubSources().first?.failures == 1)
+    await scheduler.shutdown()
+}
+
+private actor RepositoryPollTransport: GitHubHTTPTransport {
+    func get(_ request: URLRequest) throws -> HTTPResponse {
+        if request.url!.path.contains("/broken/") { return HTTPResponse(data: Data(), status: 503) }
+        return pollResponse("[]")
+    }
+}
+
+@Test func repositoryPollingFailuresDoNotBlockOtherConfiguredRepositories() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try Store(path: ":memory:")
+    try await store.addGitHubSource(repository: "o/broken", localRepository: root.path, author: "me")
+    try await store.addGitHubSource(repository: "o/healthy", localRepository: root.path, author: "me")
+    let scheduler = GitHubPollingScheduler(store: store, client: try GitHubClient(transport: RepositoryPollTransport()))
+    try await scheduler.tick()
+    for _ in 0..<300 {
+        let sources = try await store.gitHubSources()
+        if sources[0].failures == 1 && sources[1].lastSuccess != nil { break }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    let sources = try await store.gitHubSources()
+    #expect(sources[0].lastError?.contains("503") == true)
+    #expect(sources[1].lastSuccess != nil)
+    #expect(sources[1].failures == 0)
+    await scheduler.shutdown()
+}
+
+@Test func repositoryPollingMigrationPreservesExistingCursor() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let path = root.appendingPathComponent("state.sqlite").path
+    let store = try Store(path: path)
+    try await store.commitPoll(sourceKey: "github:o/r:pr:1", repository: root.path, workerKind: .codex, expectedGeneration: nil, events: [feedback("v1")])
+    let sqlite = GHProcessRunner(executable: URL(fileURLWithPath: "/usr/bin/sqlite3"))
+    let fixture = try await sqlite.run(arguments: [path, "DROP TABLE github_sources; PRAGMA user_version = 5;"])
+    #expect(fixture.exitCode == 0)
+    let upgraded = try Store(path: path)
+    #expect(try await upgraded.pollingCursor(sourceKey: "github:o/r:pr:1", repository: root.path, workerKind: .codex)?.generation == 1)
+    #expect(try await upgraded.sources().count == 1)
+    try await upgraded.addGitHubSource(repository: "o/r", localRepository: root.path, author: "me")
+    #expect(try await upgraded.gitHubSources().count == 1)
+}

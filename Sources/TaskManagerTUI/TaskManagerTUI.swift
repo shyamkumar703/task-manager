@@ -8,9 +8,10 @@ import TaskManagerRuntime
 @MainActor
 public final class TaskManagerTUI {
     private enum Composer {
-        case new, message(String), answer(String), source, sourceAnswer(Int64, Int)
+        case new, message(String), answer(String), source, sourceAnswer(Int64, Int), github(Int, [String])
         var title: String {
             switch self {
+            case .github(let step, _): ["GitHub repository: OWNER/REPO", "Absolute local checkout path", "Your GitHub login (observe your open PRs)", "Poll interval in seconds (10...86400)"][step]
             case .new: "New task goal"
             case .message: "Follow-up to selected child"
             case .answer: "Answer pending question"
@@ -29,6 +30,9 @@ public final class TaskManagerTUI {
     private var sources: [IncomingSource] = []
     private var selectedSourceID: Int64?
     private var showingSources = false
+    private var showingGitHub = false
+    private var githubSources: [GitHubSource] = []
+    private var selectedGitHubID: String?
     private var session: AgentSessionRecord?
     private var output: [AgentOutput] = []
     private var messages: [TaskMessage] = []
@@ -78,9 +82,11 @@ public final class TaskManagerTUI {
     }
 
     private func reload() async throws {
+        githubSources = try await store.gitHubSources()
+        if !githubSources.contains(where: { $0.id == selectedGitHubID }) { selectedGitHubID = githubSources.first?.id }
         tasks = try await store.tasks()
         questions = try await store.questions()
-        sources = try await store.sources(repository: repository)
+        sources = try await store.sources()
         if selectedSourceID == nil || !sources.contains(where: { $0.id == selectedSourceID }) { selectedSourceID = sources.first?.id }
         if selectedID == nil || !tasks.contains(where: { $0.id == selectedID }) { selectedID = tasks.first?.id }
         if let id = selectedID {
@@ -97,7 +103,22 @@ public final class TaskManagerTUI {
             case 10, 13, 343:
                 let text = String(decoding: input, as: UTF8.self)
                 try requireText(text, name: "Input")
+                if case .github(let step, let values) = composer {
+                    let values = values + [text]
+                    if step < 3 {
+                        self.composer = .github(step + 1, values)
+                        input = Data((step == 0 ? repository : step == 2 ? "60" : "").utf8)
+                        return
+                    }
+                    guard let interval = Int(text) else { throw ManagerError.invalid("Interval must be seconds") }
+                    selectedGitHubID = try await store.addGitHubSource(repository: values[0], localRepository: values[1], author: values[2], intervalSeconds: interval)
+                    self.composer = nil; input = Data()
+                    notice = "Repository saved; coordinator will discover and poll your open PRs automatically"
+                    try await reload()
+                    return
+                }
                 switch composer {
+                case .github: break
                 case .new:
                     let task = try await store.createAgentTask(goal: text, repository: repository, kind: kind)
                     selectedID = task.id
@@ -137,6 +158,21 @@ public final class TaskManagerTUI {
         if key == tm_key_down() || key == 106 { select(1); return }
         if key == tm_key_page_up() { scroll += max(1, Int(tm_terminal_rows()) - 12); return }
         if key == tm_key_page_down() { scroll = max(0, scroll - max(1, Int(tm_terminal_rows()) - 12)); return }
+        if key == 103 { showingGitHub.toggle(); showingSources = false; scroll = 0; return }
+        if showingGitHub {
+            switch key {
+            case 113, 3: running = false
+            case 110: composer = .github(0, []); input = Data()
+            case 112:
+                if let source = githubSources.first(where: { $0.id == selectedGitHubID }) {
+                    try await store.setGitHubSourceEnabled(source.id, enabled: !source.enabled)
+                    try await reload()
+                }
+            case 101: showingGitHub = false; showingSources = true
+            default: break
+            }
+            return
+        }
         if key == 101 { showingSources.toggle(); scroll = 0; return }
         if key == 115 { composer = .source; input = Data(); return }
         if showingSources, ![Int32(113), 3, 9, 110].contains(key) {
@@ -212,6 +248,12 @@ public final class TaskManagerTUI {
     }
 
     private func select(_ delta: Int) {
+        if showingGitHub {
+            guard !githubSources.isEmpty else { return }
+            let index = githubSources.firstIndex(where: { $0.id == selectedGitHubID }) ?? 0
+            selectedGitHubID = githubSources[min(githubSources.count - 1, max(0, index + delta))].id
+            return
+        }
         if showingSources {
             guard !sources.isEmpty else { return }
             let index = sources.firstIndex(where: { $0.id == selectedSourceID }) ?? 0
@@ -237,6 +279,24 @@ public final class TaskManagerTUI {
         let masterQuestions = sources.filter { $0.disposition == .waitingForUser }.count
         let incoming = sources.filter { [.pending, .triaging, .failed].contains($0.disposition) }.count
         draw(0, 0, " TASK MANAGER   new: \(kind.rawValue.uppercased())   coordinator: \(live ? "running" : "offline")   asks: \(questions.count + masterQuestions)   inbox: \(incoming) ", width: columns, emphasis: 2)
+        if showingGitHub {
+            draw(1, 1, "GITHUB REPOSITORIES", width: columns - 2, emphasis: 1)
+            if githubSources.isEmpty { draw(3, 1, "Press n to configure a repository. gh authentication must already be set up.", width: columns - 2) }
+            let selected = githubSources.firstIndex(where: { $0.id == selectedGitHubID }) ?? 0
+            let capacity = max(1, (rows - 8) / 5)
+            for (index, source) in githubSources.dropFirst(max(0, selected - capacity + 1)).prefix(capacity).enumerated() {
+                let y = 3 + index * 5
+                let success = source.lastSuccess.map { Date(timeIntervalSince1970: $0).formatted() } ?? "not yet"
+                draw(y, 1, "\(source.id == selectedGitHubID ? ">" : " ") \(source.repository) · \(source.enabled ? "enabled" : "disabled") · every \(source.intervalSeconds)s", width: columns - 2, emphasis: source.id == selectedGitHubID ? 2 : 0)
+                draw(y + 1, 3, "Open PRs by \(source.author) → \(source.localRepository)", width: columns - 4)
+                let next = !source.enabled ? "disabled" : source.nextPoll == 0 ? "due now" : Date(timeIntervalSince1970: source.nextPoll).formatted()
+                draw(y + 2, 3, "Last success: \(success) · next: \(next)", width: columns - 4)
+                draw(y + 3, 3, source.lastError.map { "Error: " + $0 } ?? "First successful poll baselines history; later feedback enters the incoming view.", width: columns - 4)
+            }
+            drawFooter(rows: rows, columns: columns)
+            tm_terminal_refresh()
+            return
+        }
         if showingSources {
             drawSources(rows: rows, columns: columns, left: left, right: right, width: width)
             drawFooter(rows: rows, columns: columns)
@@ -326,12 +386,15 @@ public final class TaskManagerTUI {
             for (offset, line) in lines.suffix(2).enumerated() { draw(rows - 3 + offset, 1, line, width: columns - 2) }
         } else {
             draw(rows - 4, 1, notice, width: columns - 2)
-            if showingSources {
+            if showingGitHub {
+                draw(rows - 3, 1, "n add repository · p enable/disable · ↑↓ select", width: columns - 2)
+                draw(rows - 2, 1, "g tasks · e incoming · q detach (polling continues)", width: columns - 2)
+            } else if showingSources {
                 draw(rows - 3, 1, "s inject source · a clarify · Enter open child · r retry · x ignore", width: columns - 2)
-                draw(rows - 2, 1, "e tasks · ↑↓ select · PgUp/Dn scroll · Tab new-worker runtime · q detach", width: columns - 2)
+                draw(rows - 2, 1, "g GitHub · e tasks · ↑↓ select · PgUp/Dn scroll · Tab new-worker runtime · q detach", width: columns - 2)
             } else {
                 draw(rows - 3, 1, "n new · m msg · a answer · p pause · t terminal · d remove · s source", width: columns - 2)
-                draw(rows - 2, 1, "e incoming · r retry · x cancel · Tab runtime · ↑↓ select · PgUp/Dn · q quit", width: columns - 2)
+                draw(rows - 2, 1, "g GitHub · e incoming · r retry · x cancel · Tab runtime · ↑↓ select · PgUp/Dn · q quit", width: columns - 2)
             }
         }
     }

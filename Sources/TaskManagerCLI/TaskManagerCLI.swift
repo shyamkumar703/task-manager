@@ -50,7 +50,7 @@ struct TaskManagerCLI {
             }
             return
         }
-        let known = ["init", "add", "list", "show", "status", "resume", "message", "ask", "answer", "questions", "journal", "ingest", "route", "propose-comment", "proposals", "decide", "github-import", "github-poll", "github-prs", "tui", "serve", "coordinator-stop", "agent-add", "transcript", "archive", "restore", "terminal", "release-terminal", "source-inject", "source-events", "source-answer", "source-retry", "source-ignore"]
+        let known = ["init", "add", "list", "show", "status", "resume", "message", "ask", "answer", "questions", "journal", "ingest", "route", "propose-comment", "proposals", "decide", "github-import", "github-poll", "github-watch", "github-sources", "github-enable", "github-disable", "github-prs", "tui", "serve", "coordinator-stop", "agent-add", "transcript", "archive", "restore", "terminal", "release-terminal", "source-inject", "source-events", "source-answer", "source-retry", "source-ignore"]
         guard known.contains(command) else { throw ManagerError.invalid("Unknown command: \(command). Run task-manager help.") }
         try FileManager.default.createDirectory(atPath: statePath, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         statePath = URL(fileURLWithPath: statePath).standardizedFileURL.resolvingSymlinksInPath().path
@@ -136,6 +136,13 @@ struct TaskManagerCLI {
             let repository = try GitHubRepository(args[0])
             let client = try GitHubClient()
             try output(await client.openPullRequests(in: repository, author: args[1]))
+        case "github-watch":
+            try count(4)
+            guard let interval = Int(args[3]) else { throw ManagerError.invalid("Interval must be seconds") }
+            print(try await store.addGitHubSource(repository: args[0], localRepository: args[1], author: args[2], intervalSeconds: interval))
+        case "github-sources": try count(0); try output(await store.gitHubSources())
+        case "github-enable", "github-disable":
+            try count(1); try await store.setGitHubSourceEnabled(args[0], enabled: command == "github-enable")
         case "github-poll":
             try count(3)
             guard let pr = Int(args[1]), pr > 0 else { throw ManagerError.invalid("PR number must be positive") }
@@ -202,6 +209,11 @@ struct TaskManagerCLI {
       questions                             List unanswered questions
       answer QUESTION_ID TEXT               Save answer and queue continuation
       ingest EVENTS_JSON                    Ingest normalized source events
+      github-watch OWNER/REPO LOCAL_REPO AUTHOR SECONDS
+                                        Configure automatic polling of author’s open PRs
+      github-sources                        List repository polling health
+      github-enable ID                      Enable automatic repository polling
+      github-disable ID                     Disable automatic repository polling
       github-poll OWNER/REPO PR LOCAL_REPO   Poll once with a durable cursor; first poll baselines
       github-import OWNER/REPO PR            Read PR feedback using gh authentication
       github-prs OWNER/REPO AUTHOR           List author's open PRs using gh
