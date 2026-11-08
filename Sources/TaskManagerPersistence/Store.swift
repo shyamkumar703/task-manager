@@ -134,7 +134,8 @@ public actor Store {
                 INSERT INTO events(integration, source_id, revision, association_key, body, url)
                 VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(integration, source_id, revision) DO NOTHING
                 """, [event.integration, event.sourceID, event.revision, event.associationKey, event.body, event.url])
-            if db.changes == 1 {
+            let newlyInserted = db.changes == 1
+            if newlyInserted {
                 if baseline {
                     try db.execute("UPDATE events SET disposition = 'ignored' WHERE id = ?", [String(db.lastID)])
                 }
@@ -148,6 +149,9 @@ public actor Store {
                     guard existing["repository"] == scope else { throw ManagerError.conflict("Source event is already scoped to another repository") }
                 }
                 try db.execute("INSERT INTO event_context(event_id, repository, worker_kind) VALUES (?, ?, ?) ON CONFLICT(event_id) DO NOTHING", [id, scope, workerKind.rawValue])
+                if baseline && newlyInserted {
+                    try db.execute("UPDATE event_context SET reason = 'Initial polling baseline: recorded existing history without starting work' WHERE event_id = ?", [id])
+                }
             }
         }
         return inserted

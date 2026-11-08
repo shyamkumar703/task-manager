@@ -321,3 +321,59 @@ private actor FakeMasterConnection: AgentConnection {
         #expect(candidates[0].recentContext.contains { $0.contains(answer) })
     }
 }
+
+@Test func ignoredBaselineCanBeReconsideredDurablyWithoutDuplicateWork() async throws {
+    let root = try triageRoot()
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    let path = root + "/state.sqlite"
+    let store = try Store(path: path)
+    let event = SourceEvent(integration: "github", sourceID: "comment:1", revision: "1", associationKey: "github:o/r:pr:1", body: "Return typed Result errors", url: "https://github.com/o/r/pull/1")
+    try await store.commitPoll(sourceKey: event.associationKey, repository: root, workerKind: .mock, expectedGeneration: nil, events: [event])
+    let baseline = try #require(await store.sources().first)
+    #expect(baseline.disposition == .ignored)
+    #expect(baseline.reason?.contains("Initial polling baseline") == true)
+    try await store.unignoreSource(baseline.id)
+    let reopened = try Store(path: path)
+    let pending = try await reopened.source(baseline.id)
+    #expect(pending.disposition == .pending)
+    #expect(pending.attempts == 0)
+    #expect(pending.body == event.body)
+    #expect(pending.url == event.url)
+    await #expect(throws: ManagerError.self) { try await reopened.unignoreSource(baseline.id) }
+    // Subsequent polls must not swallow the user's explicit reconsideration.
+    try await reopened.commitPoll(sourceKey: event.associationKey, repository: root, workerKind: .mock, expectedGeneration: 1, events: [event])
+    #expect(try await reopened.source(baseline.id).disposition == .pending)
+    let claimed = try #require(await reopened.claimTriageEvent())
+    #expect(claimed.id == baseline.id)
+    let decision = TriageDecision(action: .create, goal: "Return typed Result errors", reason: "Actionable review feedback")
+    #expect(try await reopened.applyTriage(eventID: claimed.id, decision: decision))
+    #expect(try await reopened.applyTriage(eventID: claimed.id, decision: decision) == false)
+    #expect(try await reopened.tasks().count == 1)
+    await #expect(throws: ManagerError.self) { try await reopened.unignoreSource(baseline.id) }
+}
+
+@Test func unignorePreservesUserClarificationAndResetsFailedTriageBudget() async throws {
+    let root = try triageRoot()
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    let store = try Store(path: ":memory:")
+    let id = try await store.injectSource(body: "Change the implementation", repository: root)
+    _ = try await store.claimTriageEvent()
+    try await store.applyTriage(eventID: id, decision: .init(action: .clarify, reason: "Missing target", question: "Which command?"))
+    try await store.answerSource(eventID: id, text: "The add command")
+    let now = Date()
+    for attempt in 0..<3 {
+        _ = try await store.claimTriageEvent(now: now.addingTimeInterval(Double(attempt * 20)))
+        try await store.failTriage(id, error: "Unavailable", now: now.addingTimeInterval(Double(attempt * 20)))
+    }
+    try await store.ignoreSource(id)
+    try await store.unignoreSource(id)
+    let restored = try await store.source(id)
+    #expect(restored.attempts == 0)
+    #expect(restored.lastError == nil)
+    #expect(restored.question == nil)
+    #expect(restored.clarification?.contains("The add command") == true)
+    #expect(try await store.claimTriageEvent(now: now)?.id == id)
+    try await store.applyTriage(eventID: id, decision: .init(action: .ignore, reason: "Still unrelated to any work"))
+    try await store.unignoreSource(id)
+    #expect(try await store.source(id).disposition == .pending)
+}

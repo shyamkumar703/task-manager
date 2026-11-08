@@ -227,8 +227,9 @@ public final class TaskManagerTUI {
                 guard source.disposition == .waitingForUser else { notice = "No master question for this source"; return }
                 composer = .sourceAnswer(source.id, source.attempts); input = Data()
             case 114: try await store.retrySource(source.id); try await reload(); notice = "Master triage queued for retry"
+            case 117: try await store.unignoreSource(source.id); try await reload(); notice = "Source unignored; queued for master triage"
             case 120: try await store.ignoreSource(source.id); try await reload(); notice = "Source event ignored"
-            default: notice = "Sources: Enter opens child · a answers master · r retries failure · x ignores · e returns"
+            default: notice = "Sources: Enter opens child · a answers master · r retries failure · u unignores · x ignores · e returns"
             }
             return
         }
@@ -471,7 +472,7 @@ public final class TaskManagerTUI {
                 draw(rows - 3, 1, "n discover/add · p enable/disable · i interval · ↑↓ select", width: columns - 2)
                 draw(rows - 2, 1, "g tasks · e incoming · q detach (polling continues)", width: columns - 2)
             } else if showingSources {
-                draw(rows - 3, 1, "s inject source · a clarify · Enter open child · r retry · x ignore", width: columns - 2)
+                draw(rows - 3, 1, "s inject source · a clarify · Enter open child · r retry · u unignore · x ignore", width: columns - 2)
                 draw(rows - 2, 1, "g GitHub · e tasks · ↑↓ select · PgUp/Dn scroll · Tab new-worker runtime · q detach", width: columns - 2)
             } else {
                 draw(rows - 3, 1, "n new · m msg · a answer · p pause · t terminal · d remove · s source", width: columns - 2)

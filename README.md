@@ -105,6 +105,7 @@ The incoming-events view shows the source text, decision, reason, destination, a
 
 - **`e`** to inspect incoming events or return to tasks.
 - **Enter** on a routed/created event to open its child.
+- **`u`** on an ignored event to send the original message back through master triage, including initial baseline history. Existing user clarifications are preserved; reconsideration does not force a particular routing decision.
 - **`a`** on a waiting event to answer the master's question; the original message and clarification are reconsidered together.
 - **`r`** to retry failed triage.
 - **`x`** to ignore an unapplied event. Already-delivered messages cannot be unsent.
@@ -225,3 +226,5 @@ Equivalent CLI configuration, using the same state directory as the TUI:
 The coordinator must be running (`tui` starts it, or use `serve`). Each remote repository has one configuration per state directory. Polling is independent of the new-task MOCK/CODEX toggle; automatically created source tasks use Codex.
 
 `github-watch LOCAL_REPO [SECONDS]` detects the authenticated account and checkout origin. The older explicit `github-watch OWNER/REPO LOCAL_REPO AUTHOR SECONDS` form remains available for advanced configuration. Discovery never clones repositories or enables monitoring until you select one.
+
+Ignored source events can also be reconsidered with `task-manager --state-dir PATH source-unignore EVENT_ID`. The original event is requeued in place; its prior decision remains in the journal. New initial-baseline events display an explicit baseline reason in the incoming view.

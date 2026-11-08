@@ -182,6 +182,18 @@ extension Store {
         }
     }
 
+    public func unignoreSource(_ id: Int64) throws {
+        try db.transaction {
+            let event = try source(id)
+            guard event.disposition == .ignored, event.messageID == nil else {
+                throw ManagerError.conflict("Only ignored source events without a delivered task message can be reconsidered")
+            }
+            try db.execute("UPDATE events SET disposition = 'pending' WHERE id = ?", [String(id)])
+            try db.execute("UPDATE event_context SET attempts = 0, retry_after = 0, last_error = NULL, question = NULL, reason = 'Unignored by user; queued for triage' WHERE event_id = ?", [String(id)])
+            try log(taskID: event.taskID, kind: "triage.unignored", detail: "\(id): previous reason: \(event.reason ?? "No saved reason (initial baseline or legacy import)")")
+        }
+    }
+
     public func ignoreSource(_ id: Int64) throws {
         try db.transaction {
             let event = try source(id)
