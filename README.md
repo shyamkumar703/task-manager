@@ -45,6 +45,8 @@ The TUI starts or attaches to a coordinator for that state directory. It opens i
 | `p` | Pause or resume the selected child |
 | `r` | Retry/continue a completed, failed, or paused task |
 | `x` | Cancel the selected task, preserving its local work |
+| `t` | Open an interactive shell in the selected child's worktree |
+| `d` | Remove the selected task from the list, retaining its history |
 | `Tab` | Switch new tasks between MOCK and CODEX |
 | Up/Down or `j`/`k` | Select a task |
 | PageUp/PageDown | Scroll its conversation |
@@ -60,6 +62,19 @@ Answer with `a`; it resumes the same saved Codex thread. To test in-flight updat
 
 Real coding tasks get branches named `task-manager/TASK_ID` and worktrees under the state directory's `worktrees/`. The user's original checkout and uncommitted changes are preserved; work starts from committed HEAD. Use `show TASK_ID` to see the full workspace path and thread ID, and inspect that worktree with git as needed. Completed worktrees are retained.
 
+Press `t` to use that worktree directly. An active worker pauses and releases ownership before your configured interactive shell opens in the existing terminal. Run `git status`, commit, or push manually there. `exit` returns to the TUI; press `p` if you want a paused child to continue. The terminal also shows the command to resume its saved Codex conversation interactively. Mock tasks have no worktree terminal.
+
+The shell exports `TASK_MANAGER_TASK_ID`, `TASK_MANAGER_WORKTREE`, and `TASK_MANAGER_CODEX_THREAD_ID`. Its durable manual-ownership reservation prevents a coordinator from restarting the worker while the shell is open, even if another UI queues it. After a crashed shell, close any remaining manual session before clearing the reservation with `release-terminal TASK_ID`.
+
+Press `d` to archive a task. Unlike cancellation, this removes it from the task list and attention count across restarts. Active work is paused; its database record, conversation, pending questions, branch, and worktree remain. Incoming feedback cannot reactivate an archived task. Use these CLI commands to inspect or restore it:
+
+```sh
+.build/debug/task-manager --state-dir .state/dev list --all
+.build/debug/task-manager --state-dir .state/dev restore TASK_ID
+```
+
+Restoring returns it to the list without starting a worker. Previously active tasks remain paused; completed/cancelled tasks retain their status. `archive TASK_ID` and `terminal TASK_ID` provide the same actions from the CLI.
+
 The coordinator runs up to two workers at once. Waiting for a question releases the worker slot. Closing the UI keeps the coordinator alive; reopen the same command to reattach. To stop it deliberately:
 
 ```sh
@@ -67,6 +82,8 @@ The coordinator runs up to two workers at once. Waiting for a question releases 
 ```
 
 Stopping pauses active work. After a coordinator crash, previously running tasks reopen **paused** for inspection; press `p` to resume using their saved workspace, thread, transcript, and inbox. The UI and coordinator currently coordinate through SQLite, avoiding an additional socket protocol for this prototype.
+
+After rebuilding, reopen the TUI to load new controls. It gracefully replaces older coordinators that do not support workspace ownership; any active tasks are paused and retained during that upgrade.
 
 Codex workers use full access and no runtime approval prompts, as requested. They are instructed to work locally and not publish or mutate external systems. That instruction is not a sandbox-enforced guarantee. The application's external action executor remains disabled.
 

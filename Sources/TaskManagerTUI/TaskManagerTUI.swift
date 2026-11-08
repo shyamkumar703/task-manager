@@ -50,7 +50,10 @@ public final class TaskManagerTUI {
         termination.setEventHandler { self.running = false }
         termination.resume()
         defer { termination.cancel(); signal(SIGTERM, previous) }
-        daemon = try Daemon.start(executable: executable, stateDirectory: stateDirectory)
+        notice = "Starting or updating the coordinator…"
+        draw()
+        daemon = try await Daemon.start(executable: executable, stateDirectory: stateDirectory)
+        notice = "Press n to create a Codex task; t opens a child's terminal; d removes a task."
         var refreshed = ContinuousClock.now.advanced(by: .seconds(-1))
         while running {
             if refreshed.duration(to: .now) >= .milliseconds(250) {

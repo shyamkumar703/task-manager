@@ -47,3 +47,13 @@ Validation:
 - Original offline smoke test and test-checkout smoke test pass. Latest checkout evidence: `.task-manager-state/run.syPsvU/`.
 
 Remaining product work: user testing/refinement of the manual UI, automatic master triage, continuous source polling/baselines/backoff, structured external action proposals from workers, publication with explicit approval/reconciliation, online backup/log rotation, stronger subprocess-tree recovery, and optional launchd management. Full-access workers are instructed not to publish; that is not an OS-enforced barrier.
+
+## Worktree terminals and task removal
+
+Added `t` to pause/release a selected child and open an interactive shell in its worktree, returning to the TUI on `exit`. The shell has task/worktree/thread environment variables and displays the saved Codex resume command. Committing and pushing remain manual user actions. Foreground process-group transfer and terminal restoration were verified in a real PTY by running `pwd` and `git branch --show-current`, then exiting back to the TUI.
+
+Added `d` to archive tasks and hide them across restarts. Archiving pauses active work and hides unanswered questions while retaining task state, transcripts, inbox, source history, worktree, and branch. Archived tasks reject mutations and source reactivation. `list --all`, `archive`, and `restore` support retained history; restore does not start work automatically.
+
+Schema v3 adds archival timestamps and worker/manual workspace ownership. Worker startup claims execution atomically; releasing a runtime clears its ownership after stopping the connection. A manual terminal reservation excludes workers until the shell closes. CLI `terminal` and `release-terminal` support manual access and explicit stale-ownership recovery. Reopening a rebuilt TUI gracefully upgrades an incompatible coordinator before exposing ownership-dependent controls.
+
+Validation: **40 tests pass**. Added coverage for archive persistence, retained history, archived-question filtering/restoration, source/approval/message guards, active-worker shutdown on archive, terminal handoff waiting, exclusive ownership, and timeout cleanup. Real PTY checks verified shell cwd/branch, return to TUI, immediate task removal, and retained `list --all` history. A compatibility-marker test verified graceful replacement of an older coordinator. Original smoke and repository-local smoke tests also pass. No pushes were performed.
