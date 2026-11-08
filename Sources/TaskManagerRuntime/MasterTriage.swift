@@ -84,10 +84,11 @@ public struct CodexMasterTriage: TriageEngine {
             "repository": .object(["type": .array([.string("string"), .string("null")])]),
             "goal": .object(["type": .array([.string("string"), .string("null")])]),
             "reason": .object(["type": .string("string")]),
+            "pullRequestNumber": .object(["type": .array([.string("integer"), .string("null")])]),
             "inspectionScope": .object(["type": .array([.string("string"), .string("null")]), "enum": .array([.string("code"), .string("status"), .null])]),
             "question": .object(["type": .array([.string("string"), .string("null")])]),
         ]),
-        "required": .array(["action", "taskID", "goal", "reason", "question", "repository", "inspectionScope"].map(JSONValue.string)),
+        "required": .array(["action", "taskID", "goal", "reason", "question", "repository", "inspectionScope", "pullRequestNumber"].map(JSONValue.string)),
     ])
 
     private static let instructions = """
@@ -148,7 +149,10 @@ public struct CodexMasterTriage: TriageEngine {
       Set inspectionScope=status for PR status/merge/review/check questions that can be answered
       from live GitHub evidence without a code checkout; set code for code explanations and fixes
       that require inspection. Use null for all other actions. Identify PR numbers from the message
-      and conversation history in the goal. The manager collects live PR status through gh.
+      and conversation history in the goal AND set pullRequestNumber to the selected PR number.
+      This structured field is required when referring to a PR inferred from candidate task history,
+      even if the current Slack message does not contain the number. Use null when no PR applies
+      or for other actions. The manager collects live PR status through gh.
       Supply a clear investigation goal. taskID may
       identify a related candidate only as project context; do not resume or modify that task.
       Otherwise choose a known repository (or keep the scoped event repository); question null.

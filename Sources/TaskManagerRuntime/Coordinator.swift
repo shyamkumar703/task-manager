@@ -100,7 +100,9 @@ public actor Coordinator {
             try await store.writeOutput(taskID: id, itemID: "setup-\(generation)", kind: "system", text: "Preparing isolated worktree and connecting to Codex…")
             var explorationSource: IncomingSource?
             if session.purpose == .exploration, let source = try await store.sources(taskID: id).first(where: { $0.disposition == .created }) {
-                if let context = try await githubResolver.resolve(source: source, candidates: [], refresh: true, includeEvidence: true) {
+                let selectedPR = try await store.output(taskID: id, itemID: "inspection-pr").flatMap { Int($0.text) }
+                let investigationGoal = try await store.task(id).goal
+                if let context = try await githubResolver.resolve(source: source, candidates: [], refresh: true, includeEvidence: true, selectedPR: selectedPR, investigationGoal: investigationGoal) {
                     explorationSource = try await store.refreshGitHubEvidence(eventID: source.id, context: context)
                     try await store.writeOutput(taskID: id, itemID: "github-evidence", kind: "system", text: "Live GitHub evidence at \(context.checkedAt ?? "unknown time")\n" + (context.liveEvidence ?? "Unavailable"))
                     try await store.record(taskID: id, kind: "exploration.github.checked", detail: "\(context.repository) PR #\(context.pullRequest) at \(context.checkedAt ?? "unknown time")")
@@ -120,8 +122,10 @@ public actor Coordinator {
             } else if session.purpose == .exploration {
                 let scope = try await store.output(taskID: id, itemID: "inspection-scope")?.text
                 let snapshot: Workspaces.ExplorationSnapshot
-                if scope == "status", let context = explorationSource?.githubContext { snapshot = try workspaces.prepareStatusInspection(taskID: id, context: context) }
-                else { snapshot = try await workspaces.prepareExploration(taskID: id, repository: session.repository, source: explorationSource) }
+                if scope == "status" {
+                    guard let context = explorationSource?.githubContext else { throw InspectionContextQuestion("Which GitHub repository and PR should this status investigation check? The selected PR could not be resolved.") }
+                    snapshot = try workspaces.prepareStatusInspection(taskID: id, context: context)
+                } else { snapshot = try await workspaces.prepareExploration(taskID: id, repository: session.repository, source: explorationSource) }
                 workspace = snapshot.path
                 try await store.setExplorationWorkspace(taskID: id, path: snapshot.path, baseRef: snapshot.reference, baseSHA: snapshot.sha, context: snapshot.provenance)
             } else {

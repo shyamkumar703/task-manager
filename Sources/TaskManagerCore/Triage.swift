@@ -39,13 +39,15 @@ public struct TriageDecision: Codable, Sendable {
     public let question: String?
     public let repository: String?
     public let inspectionScope: String?
+    public let pullRequestNumber: Int?
 
-    public init(action: TriageAction, taskID: String? = nil, goal: String? = nil, reason: String, question: String? = nil, repository: String? = nil, inspectionScope: String? = nil) {
-        self.action = action; self.taskID = taskID; self.goal = goal; self.reason = reason; self.question = question; self.repository = repository; self.inspectionScope = inspectionScope
+    public init(action: TriageAction, taskID: String? = nil, goal: String? = nil, reason: String, question: String? = nil, repository: String? = nil, inspectionScope: String? = nil, pullRequestNumber: Int? = nil) {
+        self.action = action; self.taskID = taskID; self.goal = goal; self.reason = reason; self.question = question; self.repository = repository; self.inspectionScope = inspectionScope; self.pullRequestNumber = pullRequestNumber
     }
 
     public func validate() throws {
         try requireText(reason, name: "Decision reason")
+        if let number = pullRequestNumber { guard action == .investigate, number > 0 else { throw ManagerError.invalid("Only investigations can select a positive PR number") } }
         guard inspectionScope == nil || (action == .investigate && ["status", "code"].contains(inspectionScope!)) else { throw ManagerError.invalid("Only investigations can select code/status inspection scope") }
         guard reason.count <= 4096 else { throw ManagerError.invalid("Decision reason is too long") }
         guard action == .create || action == .investigate || repository == nil else { throw ManagerError.invalid("Only create can select a repository") }

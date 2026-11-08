@@ -238,6 +238,7 @@ extension Store {
                 targetID = task.id
                 messageID = try insertMessage(taskID: task.id, body: sourceMessage(integration: event.integration, url: event.url, body: event.body, clarification: event.clarification, context: event.slackContext))
                 try writeOutput(taskID: task.id, itemID: "inspection-scope", kind: "system", text: decision.inspectionScope ?? "code")
+                if let number = decision.pullRequestNumber { try writeOutput(taskID: task.id, itemID: "inspection-pr", kind: "system", text: String(number)) }
                 try log(taskID: task.id, kind: "exploration.created", detail: "Source \(eventID); related task \(decision.taskID ?? "none"); select inspection context from source PR/branch, otherwise default branch")
             case .create:
                 let associated = try associationTargets(key: event.associationKey, repository: event.repository)

@@ -59,16 +59,15 @@ private func policyRepository() async throws -> (String, String) {
 @Test func barePRStatusUsesLiveEvidenceWithoutRequiringPRCommitLocally() async throws {
     let (root, repo) = try await policyRepository(); defer { try? FileManager.default.removeItem(atPath: root) }
     let store = try Store(path: root + "/state.sqlite")
-    let id = try await store.injectSource(body: "What is the status of PR #5? Is it merged?", repository: repo)
+    let id = try await store.injectSource(body: "where are we with the delete command work", repository: repo)
     let source = try #require(await store.claimTriageEvent())
     let resolver = GitHubContextResolver(client: try GitHubClient(transport: StatusEvidenceAPI()))
-    let context = try #require(await resolver.resolve(source: source, candidates: [], includeEvidence: true))
+    let context = try #require(await resolver.resolve(source: source, candidates: [], includeEvidence: true, selectedPR: 5))
     #expect(context.pullRequest == 5)
     #expect(context.liveEvidence?.contains("Merged: true") == true)
     #expect(context.liveEvidence?.contains("APPROVED") == true)
     #expect(context.liveEvidence?.contains("command-tests: completed, success") == true)
-    _ = try await store.recordGitHubContext(eventID: id, context: context)
-    try await store.applyTriage(eventID: id, decision: .init(action: .investigate, goal: "Check PR #5 status", reason: "Status question", inspectionScope: "status"))
+    try await store.applyTriage(eventID: id, decision: .init(action: .investigate, goal: "Check PR #5 status", reason: "Status question", inspectionScope: "status", pullRequestNumber: 5))
     let taskID = try #require(await store.source(id).taskID)
     for index in 0..<210 { try await store.writeOutput(taskID: taskID, itemID: "old-\(index)", kind: "system", text: "Old transcript entry") }
     let agent = EvidenceAgent()
@@ -153,4 +152,30 @@ func liveMasterTreatsCanYouPushAsAnActionRequest() async throws {
     let decision = try await CodexMasterTriage(stateDirectory: root).decide(event: event, candidates: store.triageCandidates(repository: repo))
     #expect(decision.action == .route)
     #expect(decision.taskID == task.id)
+}
+
+@Test func PRMentionOnlyInInvestigationGoalStillTriggersAuthenticatedLookup() async throws {
+    let (root, repo) = try await policyRepository(); defer { try? FileManager.default.removeItem(atPath: root) }
+    let store = try Store(path: root + "/state.sqlite")
+    let id = try await store.injectSource(body: "where are we with the delete command work", repository: repo)
+    let source = try await store.source(id)
+    let resolver = GitHubContextResolver(client: try GitHubClient(transport: StatusEvidenceAPI()))
+    let context = try #require(await resolver.resolve(source: source, candidates: [], includeEvidence: true, investigationGoal: "Determine the current live status of deletion PR #5, including review fixes, checks, and merge state"))
+    #expect(context.pullRequest == 5)
+    #expect(context.liveEvidence?.contains("Merged: true") == true)
+}
+
+@Test(.enabled(if: ProcessInfo.processInfo.environment["TASK_MANAGER_LIVE_REQUEST_POLICY"] == "1"))
+func liveMasterPassesPRFromTaskHistoryIntoGenericStatusInvestigation() async throws {
+    let (root, repo) = try await policyRepository(); defer { try? FileManager.default.removeItem(atPath: root) }
+    let store = try Store(path: root + "/state.sqlite")
+    let owner = try await store.createAgentTask(goal: "Implement todo remove command", repository: repo, kind: .mock)
+    try await store.transition(owner.id, to: .running); try await store.transition(owner.id, to: .completed)
+    try await store.writeOutput(taskID: owner.id, itemID: "previous-result", kind: "assistant", text: "Deletion work is in PR #5: https://github.com/o/r/pull/5. The accepted command is todo remove <id>, with no delete alias.")
+    _ = try await store.injectSource(body: "where are we with the delete command work", repository: repo)
+    let event = try #require(await store.claimTriageEvent())
+    let decision = try await CodexMasterTriage(stateDirectory: root).decide(event: event, candidates: store.triageCandidates(repository: repo))
+    #expect(decision.action == .investigate)
+    #expect(decision.inspectionScope == "status")
+    #expect(decision.pullRequestNumber == 5)
 }

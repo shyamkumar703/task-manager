@@ -30,12 +30,12 @@ public struct GitHubContextResolver: Sendable {
         return found.values.first
     }
 
-    public func resolve(source: IncomingSource, candidates: [TriageCandidate], refresh: Bool = false, includeEvidence: Bool = false) async throws -> GitHubRoutingContext? {
+    public func resolve(source: IncomingSource, candidates: [TriageCandidate], refresh: Bool = false, includeEvidence: Bool = false, selectedPR: Int? = nil, investigationGoal: String? = nil) async throws -> GitHubRoutingContext? {
         if let saved = source.githubContext, !refresh { return saved }
         let location: (GitHubRepository, Int)?
         if let saved = source.githubContext { location = (try GitHubRepository(saved.repository), saved.pullRequest) }
         else if let direct = try Self.pullRequest(in: source) { location = direct }
-        else if let number = try Self.referencedNumber(in: source) {
+        else if let number = try selectedPR ?? Self.referencedNumber(in: source, investigationGoal: investigationGoal) {
             let roots = source.repository.isEmpty ? Array(Set(candidates.map(\.repository))) : [source.repository]
             var repositories: [String: GitHubRepository] = [:]
             for root in roots {
@@ -70,10 +70,10 @@ public struct GitHubContextResolver: Sendable {
         return GitHubRoutingContext(repository: repository.slug, pullRequest: number, headBranch: branch, headSHA: pull.head.sha, headRepository: pull.head.repo?.full_name, checkout: checkout?.path, checkoutSHA: checkout?.sha, owningTaskID: owner?.id ?? previousOwner, liveEvidence: includeEvidence ? await client.pullRequestEvidence(in: repository, pull: pull) : nil, checkedAt: ISO8601DateFormatter().string(from: Date()))
     }
 
-    private static func referencedNumber(in source: IncomingSource) throws -> Int? {
+    private static func referencedNumber(in source: IncomingSource, investigationGoal: String? = nil) throws -> Int? {
         let expression = try NSRegularExpression(pattern: #"(?i)\b(?:PR|pull\s+request)\s*#?\s*([0-9]+)\b"#)
         let background = (source.slackContext?.precedingMessages.map(\.text) ?? []) + (source.slackContext?.projectHistory.map { $0.message + "\n" + ($0.userClarification ?? "") } ?? [])
-        let messages = [source.clarification, source.body].compactMap { $0 } + (source.slackContext?.threadMessages.reversed().map(\.text) ?? []) + [background.joined(separator: "\n")]
+        let messages = [source.clarification, source.body].compactMap { $0 } + (source.slackContext?.threadMessages.reversed().map(\.text) ?? []) + [background.joined(separator: "\n")] + [investigationGoal].compactMap { $0 }
         for text in messages {
             let numbers = Set(expression.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { match -> Int? in
                 guard let range = Range(match.range(at: 1), in: text), let number = Int(text[range]), number > 0 else { return nil }
