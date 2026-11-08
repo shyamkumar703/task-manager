@@ -5,7 +5,7 @@ import TaskManagerCore
 import TaskManagerPersistence
 
 public enum Daemon {
-    private static let compatibilityVersion = "task-manager-8"
+    private static let compatibilityVersion = "task-manager-9"
     public static func requestStop(stateDirectory: String) throws {
         try Data().write(to: URL(fileURLWithPath: stateDirectory).appendingPathComponent("stop-request"), options: .atomic)
     }
@@ -22,7 +22,7 @@ public enum Daemon {
         try await store.record(taskID: nil, kind: "coordinator.started", detail: "pid \(ProcessInfo.processInfo.processIdentifier)")
         let coordinator = Coordinator(store: store, stateDirectory: stateDirectory)
         let polling = GitHubPollingScheduler(store: store, client: try GitHubClient())
-        let slackPolling = SlackPollingScheduler(store: store)
+        let slackPolling = SlackPollingScheduler(store: store, stateDirectory: stateDirectory)
         let oldTerm = signal(SIGTERM, SIG_IGN)
         let oldInt = signal(SIGINT, SIG_IGN)
         let sources = [SIGTERM, SIGINT].map { number in

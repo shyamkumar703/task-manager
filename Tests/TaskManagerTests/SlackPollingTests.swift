@@ -36,9 +36,9 @@ private func waitSlack(_ condition: () async throws -> Bool) async throws {
         slackResponse(#"{"ok":true,"channels":[{"id":"C1","name":"project","is_member":true},{"id":"C2","name":"not-joined","is_member":false},{"id":"C3","name":"archived","is_archived":true},{"id":"D1","is_im":true,"user":"U2"},{"id":"G1","name":"Group DM","is_mpim":true}]}"#),
     ])
     let conversations = try await SlackClient(token: "xoxp-fixture", transport: transport).conversations()
-    #expect(conversations.map(\.id) == ["C1", "D1", "G1"])
-    #expect(conversations[1].isDM)
-    #expect(conversations[1].name == "DM with U2")
+    #expect(conversations.map(\.id) == ["C1", "C2", "D1", "G1"])
+    #expect(conversations[2].isDM)
+    #expect(conversations[2].name == "DM with U2")
     let requests = await transport.requests
     #expect(requests[1].url!.query!.contains("cursor=page2"))
     #expect(requests.allSatisfy { $0.httpMethod == "GET" && $0.url!.host == "slack.com" && $0.url!.query!.contains("token=") == false })

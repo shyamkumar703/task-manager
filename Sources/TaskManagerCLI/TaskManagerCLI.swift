@@ -51,7 +51,7 @@ struct TaskManagerCLI {
             }
             return
         }
-        let known = ["init", "add", "list", "show", "status", "resume", "message", "ask", "answer", "questions", "journal", "ingest", "route", "propose-comment", "proposals", "decide", "github-import", "github-poll", "github-watch", "github-discover", "github-sources", "github-enable", "github-disable", "github-prs", "tui", "serve", "coordinator-stop", "agent-add", "transcript", "archive", "restore", "terminal", "release-terminal", "source-inject", "source-events", "source-answer", "source-retry", "source-ignore", "source-unignore", "slack-connect", "slack-conversations", "slack-watch", "slack-sources", "slack-enable", "slack-disable", "slack-poll"]
+        let known = ["init", "add", "list", "show", "status", "resume", "message", "ask", "answer", "questions", "journal", "ingest", "route", "propose-comment", "proposals", "decide", "github-import", "github-poll", "github-watch", "github-discover", "github-sources", "github-enable", "github-disable", "github-prs", "tui", "serve", "coordinator-start", "coordinator-stop", "agent-add", "transcript", "archive", "restore", "terminal", "release-terminal", "source-inject", "source-events", "source-answer", "source-retry", "source-ignore", "source-unignore", "slack-connect", "slack-conversations", "slack-watch", "slack-sources", "slack-enable", "slack-disable", "slack-poll"]
         guard known.contains(command) else { throw ManagerError.invalid("Unknown command: \(command). Run task-manager help.") }
         try FileManager.default.createDirectory(atPath: statePath, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         statePath = URL(fileURLWithPath: statePath).standardizedFileURL.resolvingSymlinksInPath().path
@@ -85,7 +85,7 @@ struct TaskManagerCLI {
             let token = try await SlackConnection.promptToken()
             do {
                 let info = try await SlackConnection.connect(token: token, stateDirectory: statePath)
-                let message = "Connected to \(info.workspaceName). Your token is saved in macOS Keychain. Select conversations in the TUI Slack view (l) to enable automatic polling."
+                let message = "Connected to \(info.workspaceName). Your token is saved in macOS Keychain. Connected workspaces are automatically discovered and monitored by the coordinator."
                 print(message)
                 fflush(stdout)
                 await SlackConnection.showResult(title: "Slack connected", message: message)
@@ -96,6 +96,10 @@ struct TaskManagerCLI {
         case "serve":
             try count(0)
             try await Daemon.serve(stateDirectory: statePath)
+        case "coordinator-start":
+            try count(0)
+            _ = try await Daemon.start(executable: URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL, stateDirectory: statePath)
+            print("Coordinator started or updated; connected Slack workspaces are monitored automatically.")
         case "coordinator-stop":
             try count(0)
             try Daemon.requestStop(stateDirectory: statePath)
@@ -231,6 +235,7 @@ struct TaskManagerCLI {
 
       tui [REPOSITORY_PATH]                 Open TUI; start/attach background coordinator
       serve                                 Run coordinator in foreground
+      coordinator-start                     Start or update the persistent coordinator
       coordinator-stop                      Pause workers and stop coordinator
       agent-add mock|codex REPO GOAL         Queue a child task (coordinator must be running)
       transcript TASK_ID                    Show saved worker output

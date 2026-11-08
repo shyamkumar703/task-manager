@@ -13,6 +13,7 @@ public struct IncomingSource: Codable, Sendable, Identifiable {
     public let body: String
     public let url: String
     public let repository: String
+    public let availableRepositories: [String]?
     public let workerKind: WorkerKind
     public let disposition: SourceDisposition
     public let taskID: String?
@@ -34,14 +35,17 @@ public struct TriageDecision: Codable, Sendable {
     public let goal: String?
     public let reason: String
     public let question: String?
+    public let repository: String?
 
-    public init(action: TriageAction, taskID: String? = nil, goal: String? = nil, reason: String, question: String? = nil) {
-        self.action = action; self.taskID = taskID; self.goal = goal; self.reason = reason; self.question = question
+    public init(action: TriageAction, taskID: String? = nil, goal: String? = nil, reason: String, question: String? = nil, repository: String? = nil) {
+        self.action = action; self.taskID = taskID; self.goal = goal; self.reason = reason; self.question = question; self.repository = repository
     }
 
     public func validate() throws {
         try requireText(reason, name: "Decision reason")
         guard reason.count <= 4096 else { throw ManagerError.invalid("Decision reason is too long") }
+        guard action == .create || repository == nil else { throw ManagerError.invalid("Only create can select a repository") }
+        if let repository { try requireText(repository, name: "Repository") }
         switch action {
         case .route:
             guard let taskID, goal == nil, question == nil else { throw ManagerError.invalid("Route requires only a task ID") }

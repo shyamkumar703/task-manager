@@ -22,3 +22,13 @@ public struct SlackSource: Codable, Sendable, Identifiable {
     public let lastError: String?
     public let failures: Int
 }
+
+public struct SlackWorkspace: Codable, Sendable, Identifiable {
+    public let id: String
+    public let name: String
+    public let userID: String
+    public let nextDiscovery: Double
+    public let lastSuccess: Double?
+    public let lastError: String?
+    public let failures: Int
+}

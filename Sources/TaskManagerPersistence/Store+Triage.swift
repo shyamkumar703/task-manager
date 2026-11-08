@@ -80,12 +80,12 @@ extension Store {
     }
 
     public func triageCandidates(repository: String) throws -> [TriageCandidate] {
-        let scope = try sourceRepository(repository)
+        let scope = repository.isEmpty ? "" : try sourceRepository(repository)
         let rows = try db.query("""
             SELECT t.id FROM tasks t JOIN agent_sessions s ON s.task_id = t.id
-            WHERE s.repository = ? AND t.archived_at IS NULL AND t.status != 'cancelled'
+            WHERE (? = '' OR s.repository = ?) AND t.archived_at IS NULL AND t.status != 'cancelled'
             ORDER BY t.updated_at DESC, t.id LIMIT 65
-            """, [scope])
+            """, [scope, scope])
         guard rows.count <= 64 else { throw ManagerError.invalid("Too many tasks for one triage context; narrow the repository's active task list") }
         return try rows.map { row in
             let task = try task(row["id"]!)
@@ -98,7 +98,7 @@ extension Store {
             let instructions = try db.query("SELECT body FROM messages WHERE task_id = ? ORDER BY sequence DESC LIMIT 8", [task.id]).reversed().map {
                 "Task inbox (source data includes separately labeled user clarification): " + String($0["body"]!.prefix(4000))
             }
-            return TriageCandidate(id: task.id, goal: String(task.goal.prefix(4096)), status: task.status, repository: scope, recentContext: resolutions + instructions + recent)
+            return TriageCandidate(id: task.id, goal: String(task.goal.prefix(4096)), status: task.status, repository: try agentSession(taskID: task.id)!.repository, recentContext: resolutions + instructions + recent)
         }
     }
 
@@ -108,6 +108,7 @@ extension Store {
         return try db.transaction {
             let event = try source(eventID)
             guard event.disposition == .triaging else { return false }
+            var destinationRepository = event.repository
             var targetID: String?
             var messageID: String?
             switch decision.action {
@@ -118,9 +119,10 @@ extension Store {
                     try holdSource(eventID, reason: "Selected task was archived or cancelled during triage", question: "Should this message be ignored or start separate work?")
                     return true
                 }
-                guard let session = try agentSession(taskID: id), session.repository == event.repository else {
+                guard let session = try agentSession(taskID: id), (event.repository.isEmpty || session.repository == event.repository) else {
                     throw ManagerError.conflict("Master selected an unavailable task or a different repository")
                 }
+                destinationRepository = session.repository
                 try validateSourceLink(event, targetID: id)
                 messageID = try insertMessage(taskID: id, body: sourceMessage(integration: event.integration, url: event.url, body: event.body, clarification: event.clarification))
                 if target.status == .completed || target.status == .failed { try changeStatus(id, to: .queued) }
@@ -129,11 +131,13 @@ extension Store {
                 let id = decision.taskID!
                 let target = try task(id)
                 guard target.archivedAt == nil, target.status != .cancelled,
-                      let session = try agentSession(taskID: id), session.repository == event.repository else {
+                      let session = try agentSession(taskID: id), (event.repository.isEmpty || session.repository == event.repository) else {
                     throw ManagerError.conflict("Conflict target is unavailable or in another repository")
                 }
+                destinationRepository = session.repository
                 try validateSourceLink(event, targetID: id)
                 try db.execute("UPDATE events SET task_id = ? WHERE id = ?", [id, String(eventID)])
+                try db.execute("UPDATE event_context SET repository = ? WHERE event_id = ?", [destinationRepository, String(eventID)])
                 try holdSource(eventID, reason: "Instruction or approach conflict: " + decision.reason, question: decision.question!)
                 return true
             case .create:
@@ -141,8 +145,17 @@ extension Store {
                 guard associated.isEmpty || (event.clarification != nil && associated.allSatisfy { $0.archivedAt != nil || $0.status == .cancelled }) else {
                     throw ManagerError.conflict("This source acquired an association while triage was running; retry to use it")
                 }
-                _ = try sourceRepository(event.repository)
-                let task = try insertAgentTask(goal: decision.goal!, repository: event.repository, kind: event.workerKind)
+                if event.repository.isEmpty {
+                    guard let requested = decision.repository, try knownRepositories().contains(requested) else {
+                        try holdSource(eventID, reason: "This Slack message has no confirmed project", question: "Which local project should this work use? Enter its absolute checkout path.")
+                        return true
+                    }
+                    destinationRepository = requested
+                } else if let requested = decision.repository, requested != event.repository {
+                    throw ManagerError.conflict("Master cannot change a scoped source's repository")
+                }
+                _ = try sourceRepository(destinationRepository)
+                let task = try insertAgentTask(goal: decision.goal!, repository: destinationRepository, kind: event.workerKind)
                 targetID = task.id
                 messageID = try insertMessage(taskID: task.id, body: sourceMessage(integration: event.integration, url: event.url, body: event.body, clarification: event.clarification))
             case .ignore: targetID = event.clarification == nil ? nil : event.taskID
@@ -151,9 +164,10 @@ extension Store {
                 return true
             }
             if let targetID, decision.action != .ignore {
-                try db.execute("INSERT INTO source_links(repository, association_key, task_id) VALUES (?, ?, ?) ON CONFLICT(repository, association_key) DO UPDATE SET task_id = excluded.task_id", [event.repository, event.associationKey, targetID])
+                try db.execute("INSERT INTO source_links(repository, association_key, task_id) VALUES (?, ?, ?) ON CONFLICT(repository, association_key) DO UPDATE SET task_id = excluded.task_id", [destinationRepository, event.associationKey, targetID])
             }
             let disposition = decision.action == .route ? "routed" : decision.action == .create ? "created" : "ignored"
+            try db.execute("UPDATE event_context SET repository = ? WHERE event_id = ?", [destinationRepository, String(eventID)])
             try db.execute("UPDATE events SET disposition = ?, task_id = ? WHERE id = ?", [disposition, targetID, String(eventID)])
             try db.execute("UPDATE event_context SET reason = ?, question = NULL, message_id = ?, last_error = NULL WHERE event_id = ?", [decision.reason, messageID, String(eventID)])
             try log(taskID: targetID, kind: "triage.\(disposition)", detail: "\(eventID): \(decision.reason)")
@@ -166,6 +180,11 @@ extension Store {
         try db.transaction {
             let event = try source(eventID)
             guard event.disposition == .waitingForUser, expectedAttempt == nil || expectedAttempt == event.attempts else { throw ManagerError.conflict("This source question has already changed or been answered") }
+            let proposedPath = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if event.repository.isEmpty, proposedPath.hasPrefix("/"), let repository = try? sourceRepository(proposedPath) {
+                try registerProject(repository: repository)
+                try db.execute("UPDATE event_context SET repository = ? WHERE event_id = ?", [repository, String(eventID)])
+            }
             let answer = (event.clarification.map { $0 + "\n\n" } ?? "") + "Question: \(event.question ?? "")\nAnswer: \(text)"
             try db.execute("UPDATE event_context SET clarification = ?, question = NULL, reason = 'Clarification saved; queued for triage', attempts = 0, retry_after = 0 WHERE event_id = ?", [answer, String(eventID)])
             try db.execute("UPDATE events SET disposition = 'pending' WHERE id = ?", [String(eventID)])
@@ -243,6 +262,10 @@ extension Store {
 
     private func associationTargets(key: String, repository: String?) throws -> [ManagedTask] {
         let ids: [[String: String]]
+        if repository == "" {
+            let links = try db.query("SELECT task_id FROM source_links WHERE association_key = ? UNION SELECT id AS task_id FROM tasks WHERE source_key = ?", [key, key])
+            return try links.map { try task($0["task_id"]!) }
+        }
         if let repository {
             if let link = try db.query("SELECT task_id FROM source_links WHERE repository = ? AND association_key = ?", [repository, key]).first {
                 let target = try task(link["task_id"]!)
@@ -273,6 +296,7 @@ extension Store {
         for (column, property) in [("task_id", "taskID"), ("reason", "reason"), ("question", "question"), ("clarification", "clarification"), ("last_error", "lastError"), ("message_id", "messageID")] {
             if let value = row[column] { object[property] = value }
         }
+        if row["repository"] == "" { object["availableRepositories"] = try knownRepositories() }
         if let delivered = row["message_delivered"] { object["messageDelivered"] = delivered == "1" }
         if let kind = row["target_kind"] { object["targetWorkerKind"] = kind }
         return try decode(IncomingSource.self, object)

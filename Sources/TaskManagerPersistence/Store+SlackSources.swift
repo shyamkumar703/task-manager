@@ -2,14 +2,14 @@ import Foundation
 import TaskManagerCore
 
 extension Store {
-    @discardableResult public func addSlackSource(workspaceID: String, workspaceName: String, userID: String, channelID: String, channelName: String, repository: String, intervalSeconds: Int = 60) throws -> String {
+    @discardableResult public func addSlackSource(workspaceID: String, workspaceName: String, userID: String, channelID: String, channelName: String, repository: String = "", intervalSeconds: Int = 60) throws -> String {
         for value in [workspaceID, userID, channelID] {
             guard !value.isEmpty, value.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) else { throw ManagerError.invalid("Invalid Slack workspace, user or conversation ID") }
         }
         try requireText(workspaceName, name: "Workspace name")
         try requireText(channelName, name: "Conversation name")
         guard (10...86400).contains(intervalSeconds) else { throw ManagerError.invalid("Interval must be 10...86400 seconds") }
-        let scope = try sourceRepository(repository)
+        let scope = repository.isEmpty ? "" : try sourceRepository(repository)
         let id = "slack:\(workspaceID):\(channelID)"
         return try db.transaction {
             guard try db.query("SELECT id FROM slack_sources WHERE id = ?", [id]).isEmpty else { throw ManagerError.conflict("Slack conversation is already configured") }
@@ -61,6 +61,7 @@ extension Store {
             try db.execute("UPDATE slack_sources SET next_poll = ?, last_error = ?, failures = ? WHERE id = ?", [String(next), String(error.prefix(2048)), String(failures), id])
             if let retryAfter {
                 try db.execute("UPDATE slack_sources SET next_poll = MAX(next_poll, ?) WHERE workspace_id = ?", [String(ceil(retryAfter)), source.workspaceID])
+                try db.execute("UPDATE slack_workspaces SET next_discovery = MAX(next_discovery, ?) WHERE id = ?", [String(ceil(retryAfter)), source.workspaceID])
             }
             try log(taskID: nil, kind: "slack.poll.failed", detail: "\(id): \(error)")
         }

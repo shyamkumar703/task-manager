@@ -89,7 +89,7 @@ final class Database {
     private func migrate() throws {
         try transaction {
             let version = try query("PRAGMA user_version").first?["user_version"] ?? "0"
-            guard ["0", "1", "2", "3", "4", "5", "6", "7"].contains(version) else {
+            guard ["0", "1", "2", "3", "4", "5", "6", "7", "8"].contains(version) else {
                 throw ManagerError.storage("Database schema \(version) is newer than this application")
             }
             if version == "0" {
@@ -191,9 +191,14 @@ final class Database {
                 try execute("CREATE TABLE IF NOT EXISTS github_sources (id TEXT PRIMARY KEY, repository TEXT NOT NULL UNIQUE, local_repository TEXT NOT NULL, author TEXT NOT NULL, interval_seconds INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, last_success REAL, next_poll REAL NOT NULL DEFAULT 0, last_error TEXT, failures INTEGER NOT NULL DEFAULT 0)")
                 try execute("PRAGMA user_version = 6")
             }
-            if version != "7" {
+            if ["0", "1", "2", "3", "4", "5", "6"].contains(version) {
                 try execute("CREATE TABLE IF NOT EXISTS slack_sources (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, workspace_name TEXT NOT NULL, user_id TEXT NOT NULL, channel_id TEXT NOT NULL, channel_name TEXT NOT NULL, repository TEXT NOT NULL, interval_seconds INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, last_success REAL, next_poll REAL NOT NULL DEFAULT 0, last_error TEXT, failures INTEGER NOT NULL DEFAULT 0)")
                 try execute("PRAGMA user_version = 7")
+            }
+            if version != "8" {
+                try execute("CREATE TABLE IF NOT EXISTS projects (repository TEXT PRIMARY KEY)")
+                try execute("CREATE TABLE IF NOT EXISTS slack_workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, user_id TEXT NOT NULL, next_discovery REAL NOT NULL DEFAULT 0, last_success REAL, last_error TEXT, failures INTEGER NOT NULL DEFAULT 0)")
+                try execute("PRAGMA user_version = 8")
             }
         }
     }

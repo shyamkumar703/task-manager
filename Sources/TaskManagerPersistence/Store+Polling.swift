@@ -8,7 +8,7 @@ public struct PollingCursor: Codable, Sendable {
 
 extension Store {
     public func pollingCursor(sourceKey: String, repository: String, workerKind: WorkerKind) throws -> PollingCursor? {
-        let scope = try sourceRepository(repository)
+        let scope = repository.isEmpty ? "" : try sourceRepository(repository)
         guard let row = try db.query("SELECT * FROM polling_cursors WHERE source_key = ?", [sourceKey]).first else { return nil }
         guard row["repository"] == scope, row["worker_kind"] == workerKind.rawValue else {
             throw ManagerError.conflict("Polling source is already configured for a different repository or worker kind")

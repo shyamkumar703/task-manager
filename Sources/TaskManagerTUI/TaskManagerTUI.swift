@@ -38,6 +38,7 @@ public final class TaskManagerTUI {
     private var showingGitHub = false
     private var showingSlack = false
     private var slackSources: [SlackSource] = []
+    private var slackWorkspaces: [SlackWorkspace] = []
     private var selectedSlackID: String?
     private var pickingSlack = false
     private var slackDiscovery: [SlackDiscoveredConversation] = []
@@ -86,6 +87,7 @@ public final class TaskManagerTUI {
         defer { termination.cancel(); signal(SIGTERM, previous) }
         notice = "Starting or updating the coordinator…"
         draw()
+        try await store.registerProject(repository: repository)
         daemon = try await Daemon.start(executable: executable, stateDirectory: stateDirectory)
         notice = "Press n for a task, s to inject a source message, or e to inspect triage."
         var refreshed = ContinuousClock.now.advanced(by: .seconds(-1))
@@ -108,6 +110,7 @@ public final class TaskManagerTUI {
 
     private func reload() async throws {
         slackSources = try await store.slackSources()
+        slackWorkspaces = try await store.slackWorkspaces()
         if !slackSources.contains(where: { $0.id == selectedSlackID }) { selectedSlackID = slackSources.first?.id }
         githubSources = try await store.gitHubSources()
         if !githubSources.contains(where: { $0.id == selectedGitHubID }) { selectedGitHubID = githubSources.first?.id }
@@ -530,7 +533,11 @@ public final class TaskManagerTUI {
             if slackIndices.isEmpty { draw(3, 1, slackDiscoveryJob == nil ? "No matching conversations. c clears the filter; r retries discovery." : "Discovering conversations…", width: columns - 2) }
             return
         }
-        if slackSources.isEmpty { draw(3, 1, "Press n to select channels or DMs from your connected Slack workspace.", width: columns - 2) }
+        if slackSources.isEmpty {
+            let error = slackWorkspaces.compactMap(\.lastError).first
+            draw(3, 1, error.map { "Discovery error: " + $0 } ?? "Connected workspaces are monitored automatically. Discovering accessible conversations…", width: columns - 2)
+        }
+        draw(2, 1, "Automatic monitoring · \(slackWorkspaces.count) workspaces · \(slackSources.count) conversations", width: columns - 2)
         let selected = slackSources.firstIndex(where: { $0.id == selectedSlackID }) ?? 0
         let capacity = max(1, (rows - 8) / 5)
         for (index, source) in slackSources.dropFirst(max(0, selected - capacity + 1)).prefix(capacity).enumerated() {
@@ -538,7 +545,7 @@ public final class TaskManagerTUI {
             let success = source.lastSuccess.map { Date(timeIntervalSince1970: $0).formatted() } ?? "not yet"
             let next = !source.enabled ? "disabled" : source.nextPoll == 0 ? "due now" : Date(timeIntervalSince1970: source.nextPoll).formatted()
             draw(y, 1, "\(source.id == selectedSlackID ? ">" : " ") \(source.workspaceName) / \(source.channelName) · \(source.enabled ? "enabled" : "disabled") · every \(source.intervalSeconds)s", width: columns - 2, emphasis: source.id == selectedSlackID ? 2 : 0)
-            draw(y + 1, 3, "Project: " + source.repository, width: columns - 4)
+            draw(y + 1, 3, "Project: " + (source.repository.isEmpty ? "Automatic task matching; questions for unclear projects" : source.repository), width: columns - 4)
             draw(y + 2, 3, "Last success: \(success) · next: \(next)", width: columns - 4)
             draw(y + 3, 3, source.lastError.map { "Error: " + $0 } ?? "New messages, edits, and thread replies enter triage; initial history is baselined.", width: columns - 4)
         }
@@ -588,7 +595,7 @@ public final class TaskManagerTUI {
         } else {
             draw(rows - 4, 1, notice, width: columns - 2)
             if showingSlack {
-                draw(rows - 3, 1, pickingSlack ? "↑↓ select · Enter add · / filter · c clear · r refresh · Esc back" : "n discover/add · p enable/disable · i interval · ↑↓ select", width: columns - 2)
+                draw(rows - 3, 1, pickingSlack ? "↑↓ select · Enter add · / filter · c clear · r refresh · Esc back" : "p pause/resume conversation · i interval · ↑↓ select (discovery is automatic)", width: columns - 2)
                 draw(rows - 2, 1, "l tasks · g GitHub · e incoming · q detach (polling continues)", width: columns - 2)
             } else if showingGitHub && pickingGitHub {
                 draw(rows - 3, 1, "↑↓ select · Enter add (60s default) · / filter · c clear · r refresh · Esc back", width: columns - 2)

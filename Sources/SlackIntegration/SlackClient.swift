@@ -83,7 +83,7 @@ public struct SlackClient: Sendable {
     public func conversations() async throws -> [SlackConversation] {
         struct Channel: Decodable { let id: String; let name: String?; let user: String?; let is_im: Bool?; let is_mpim: Bool?; let is_archived: Bool?; let is_member: Bool? }
         let channels: [Channel] = try await pages(method: "conversations.list", query: [URLQueryItem(name: "types", value: "public_channel,private_channel,im,mpim"), URLQueryItem(name: "exclude_archived", value: "true")])
-        return channels.filter { $0.is_archived != true && ($0.is_member != false || $0.is_im == true || $0.is_mpim == true) }.map {
+        return channels.filter { $0.is_archived != true }.map {
             let dm = $0.is_im == true || $0.is_mpim == true
             return SlackConversation(id: $0.id, name: $0.name ?? $0.user.map { "DM with " + $0 } ?? $0.id, isDM: dm)
         }

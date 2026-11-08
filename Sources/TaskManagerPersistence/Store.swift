@@ -146,7 +146,7 @@ public actor Store {
                 let row = try db.query("SELECT id FROM events WHERE integration = ? AND source_id = ? AND revision = ?", [event.integration, event.sourceID, event.revision]).first!
                 let id = row["id"]!
                 if let existing = try db.query("SELECT repository FROM event_context WHERE event_id = ?", [id]).first {
-                    guard existing["repository"] == scope else { throw ManagerError.conflict("Source event is already scoped to another repository") }
+                    guard scope.isEmpty || existing["repository"] == scope else { throw ManagerError.conflict("Source event is already scoped to another repository") }
                 }
                 try db.execute("INSERT INTO event_context(event_id, repository, worker_kind) VALUES (?, ?, ?) ON CONFLICT(event_id) DO NOTHING", [id, scope, workerKind.rawValue])
                 if baseline && newlyInserted {
