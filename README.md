@@ -35,7 +35,7 @@ From this repository, launch with the todo-list checkout as the repository for n
   /Users/shyamkumar/Developer/todo_list_task_manager_test
 ```
 
-The TUI starts or attaches to a coordinator for that state directory. It opens in **MOCK** mode: tasks make progress, apply inbox messages, ask a question after four steps, and continue when answered. Mock workers do not call a model or change files.
+The TUI starts or attaches to a coordinator for that state directory. It opens in **CODEX** mode: new tasks execute with real Codex workers in isolated worktrees. Press Tab to explicitly select **MOCK** for simulated progress, follow-ups, and questions without model calls or file changes. Switching modes affects new tasks only; existing mock tasks remain mock tasks.
 
 | Key | Action |
 | --- | --- |
@@ -52,7 +52,7 @@ The TUI starts or attaches to a coordinator for that state directory. It opens i
 
 In an input form, Enter sends, Ctrl-N inserts a newline, and Esc cancels. Resize is handled by ncurses; the minimum layout is 76 columns by 16 rows. Transcript controls are stripped before rendering.
 
-To exercise a **real child**, press Tab to select CODEX and then `n`. Try this goal:
+To start a **real child**, press `n` with CODEX shown in the header. Try this goal:
 
 > Read SPEC.md without changing files, then ask me which command name the todo CLI should use.
 

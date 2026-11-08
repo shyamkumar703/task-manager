@@ -28,11 +28,11 @@ public final class TaskManagerTUI {
     private var output: [AgentOutput] = []
     private var messages: [TaskMessage] = []
     private var selectedID: String?
-    private var kind: WorkerKind = .mock
+    private var kind: WorkerKind = .codex
     private var composer: Composer?
     private var input = Data()
     private var scroll = 0
-    private var notice = "Press n to create a mock task; Tab switches new tasks to Codex."
+    private var notice = "Press n to create a real Codex task; Tab selects mock mode."
     private var running = true
 
     public init(store: Store, stateDirectory: String, repository: String, executable: URL) {
@@ -200,8 +200,8 @@ public final class TaskManagerTUI {
             for (offset, line) in lines[start..<end].enumerated() { draw(6 + offset, right, line, width: width) }
         } else {
             draw(3, right, "Create a task with n. No GitHub source is required.", width: width)
-            draw(5, right, "MOCK exercises progress, follow-ups, and questions.", width: width)
-            draw(6, right, "Tab switches new tasks to real CODEX workers.", width: width)
+            draw(5, right, "CODEX executes tasks in isolated git worktrees.", width: width)
+            draw(6, right, "Tab selects MOCK for simulated interaction tests.", width: width)
         }
         draw(rows - 5, 0, String(repeating: "─", count: columns), width: columns)
         if let composer {

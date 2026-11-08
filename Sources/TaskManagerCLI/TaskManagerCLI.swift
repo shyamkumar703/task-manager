@@ -165,7 +165,7 @@ struct TaskManagerCLI {
       proposals                             Inspect exact action proposals
       decide PROPOSAL_ID approve|reject     Record a decision; never publishes
 
-    TUI tasks use mock workers by default; Tab selects real Codex workers.
+    TUI tasks use real Codex workers by default; Tab selects mock mode.
     q detaches the TUI while workers continue. No external writes are authorized.
     State defaults to ~/Library/Application Support/AutonomousTaskManager.
     Override with --state-dir or TASK_MANAGER_STATE_DIR.
