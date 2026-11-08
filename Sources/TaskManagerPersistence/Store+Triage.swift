@@ -24,6 +24,39 @@ extension Store {
         return try db.query(sourceQuery + filter + " ORDER BY e.id DESC LIMIT ?", (scope.map { [$0] } ?? []) + [String(limit)]).map(decodeSource)
     }
 
+    public func taskInfo(_ taskID: String) throws -> TaskInfo {
+        try db.transaction(readOnly: true) {
+            let task = try task(taskID)
+            // Include earlier routes even if a later investigation changed the event's current child.
+            let linked = """
+                e.task_id = ? OR EXISTS (
+                    SELECT 1 FROM journal linked WHERE linked.task_id = ?
+                    AND linked.kind IN ('triage.created', 'triage.routed', 'event.routed')
+                    AND linked.detail LIKE CAST(e.id AS TEXT) || ': %'
+                )
+                """
+            let sources = try db.query(sourceQuery + " WHERE " + linked + " ORDER BY e.id", [taskID, taskID]).map(decodeSource)
+            let journal = try db.query("""
+                SELECT j.* FROM journal j WHERE j.task_id = ? OR (
+                    j.task_id IS NULL AND j.kind LIKE 'triage.%' AND EXISTS (
+                        SELECT 1 FROM events e WHERE (\(linked))
+                        AND (j.detail = CAST(e.id AS TEXT) OR j.detail LIKE CAST(e.id AS TEXT) || ': %')
+                    )
+                ) ORDER BY j.sequence
+                """, [taskID, taskID, taskID]).map { row -> JournalEntry in
+                    var values: [String: Any] = ["id": Int64(row["sequence"]!)!, "kind": row["kind"]!, "detail": row["detail"]!, "createdAt": row["created_at"]!]
+                    if let id = row["task_id"] { values["taskID"] = id }
+                    return try decode(JournalEntry.self, values)
+                }
+            let questions = try db.query("SELECT * FROM questions WHERE task_id = ? ORDER BY rowid", [taskID]).map { row -> Question in
+                var values: [String: Any] = ["id": row["id"]!, "taskID": taskID, "prompt": row["prompt"]!]
+                if let answer = row["answer"] { values["answer"] = answer }
+                return try decode(Question.self, values)
+            }
+            return try TaskInfo(task: task, session: agentSession(taskID: taskID), messages: messages(taskID: taskID), sources: sources, journal: journal, questions: questions)
+        }
+    }
+
     public func sourcesNeedingAttention() throws -> [IncomingSource] {
         try db.query(sourceQuery + " WHERE e.disposition IN ('waitingForUser','failed') ORDER BY e.id").map(decodeSource)
     }

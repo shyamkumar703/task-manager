@@ -87,6 +87,8 @@ public final class TaskManagerTUI {
     private var session: AgentSessionRecord?
     private var outputs: [AgentOutput] = []
     private var messages: [TaskMessage] = []
+    private var taskInfoMode = false
+    private var taskInfo: TaskInfo?
     private var replySource: IncomingSource?
     private var kind: WorkerKind = .codex
     private var composer: Composer?
@@ -176,7 +178,11 @@ public final class TaskManagerTUI {
             session = try await store.agentSession(taskID: id)
             outputs = try await store.outputs(taskID: id)
             messages = try await store.messages(taskID: id)
-        } else { session = nil; outputs = []; messages = [] }
+            if taskInfoMode, page == .home, navigation.detailSource == .work {
+                if taskInfo?.task.id != id { navigation.viewport = DetailViewport() }
+                taskInfo = try await store.taskInfo(id)
+            } else { taskInfo = nil }
+        } else { session = nil; outputs = []; messages = []; taskInfo = nil }
     }
     private func show(_ page: Page) {
         self.page = page; help = false
@@ -221,7 +227,22 @@ public final class TaskManagerTUI {
         case 50: show(.activity); try await loadTranscript(); return
         case 51: show(.connections); return
         case 63: savedNavigation = navigation; help = true; navigation.focus = .detail; navigation.viewport = DetailViewport(); return
+        case 105 where page == .home:
+            if navigation.detailSource == .attention {
+                guard let id = selectedAttention?.taskID else { notice = "Select a child task in Work to inspect its history."; return }
+                try await openTask(id); taskInfoMode = true
+            } else {
+                guard selectedTask != nil else { return }
+                taskInfoMode.toggle()
+            }
+            navigation.focus = .detail
+            navigation.viewport = DetailViewport(followTail: !taskInfoMode)
+            try await loadTranscript(); return
         case 27:
+            if page == .home, taskInfoMode {
+                taskInfoMode = false; taskInfo = nil; navigation.viewport = DetailViewport(followTail: true)
+                return
+            }
             if page == .repositories { discoveryJob?.cancel(); show(.connections) }
             else { show(.home) }; try await loadTranscript(); return
         case 77: kind = kind == .codex ? .mock : .codex; notice = "New manual tasks and simulated sources use \(kind.rawValue.uppercased()). Existing tasks keep their runtime."; return
@@ -524,6 +545,10 @@ public final class TaskManagerTUI {
     }
     private func taskDetail(_ task: ManagedTask, width: Int) -> Detail {
         let role = session?.purpose.rawValue ?? "implementation"
+        if taskInfoMode, navigation.detailSource == .work, let info = taskInfo, info.task.id == task.id {
+            let lines = TaskInfoPresentation.sections(info).flatMap { section($0.title, $0.text, width: width, style: $0.style) }
+            return Detail(title: "Task info · " + single(task.goal), subtitle: "\(taskStatus(task.status)) · \(info.sources.count) connection messages · \(info.journal.count) recorded events", commands: "i / Esc: progress   o: tmux workspace   m: message   j/k · Ctrl-U/D · gg/G: scroll", lines: lines)
+        }
         var lines: [Line] = []
         if ![TaskStatus.cancelled, .completed, .failed].contains(task.status), let q = questions.first(where: { $0.taskID == task.id && $0.answer == nil }) { lines += section("ANSWER NEEDED · a responds", q.prompt, width: width, style: 4) }
         if let action = actions.first(where: { $0.taskID == task.id && $0.status == "open" }) { lines += section("REPLY READY · Home → Needs you", action.body, width: width, style: 4) }
@@ -537,7 +562,7 @@ public final class TaskManagerTUI {
             lines += section(label, text, width: width, style: style)
         }
         if outputs.isEmpty { lines += section("STATUS", "Waiting for the coordinator…", width: width, style: 3) }
-        var commands: [String] = []
+        var commands: [String] = ["i: task info"]
         if task.status != .cancelled { commands.append("m: message") }
         if ![TaskStatus.cancelled, .completed, .failed].contains(task.status), questions.contains(where: { $0.taskID == task.id && $0.answer == nil }) { commands.append("a: answer") }
         if task.status == .paused || task.status.canTransition(to: .paused) { commands.append(task.status == .paused ? "p: resume" : "p: pause") }
@@ -625,6 +650,7 @@ public final class TaskManagerTUI {
         n           New task; on Connections, add a GitHub repository
         M           Toggle CODEX / MOCK for new manual tasks
         s           Simulate a source message (Home or Activity)
+        i           Task info: origin, connection messages, decision history
         o           Open child in tmux: editor, shared Codex, shell
         m / p / t   Message / pause / exclusive terminal for a selected child
         d / x / r   Remove / cancel / retry a selected child

@@ -70,8 +70,8 @@ final class Database {
         }
     }
 
-    func transaction<T>(_ body: () throws -> T) throws -> T {
-        try execute("BEGIN IMMEDIATE")
+    func transaction<T>(readOnly: Bool = false, _ body: () throws -> T) throws -> T {
+        try execute(readOnly ? "BEGIN" : "BEGIN IMMEDIATE")
         do {
             let result = try body()
             try execute("COMMIT")

@@ -54,12 +54,15 @@ The home dashboard places **Needs you** above the work list, with the selected i
 | `o` in Needs you | Inspect the linked child |
 | `n` | New task; on Connections, add a GitHub repository |
 | `M` | Switch new manual tasks/simulated sources between CODEX and MOCK |
+| `i` on Home | Task info: origin, connection messages, and recorded decisions; `i` / Esc returns to progress |
 | `o` on work | Open the task’s tmux workspace: Neovim, the same live Codex child, and a shell |
 | `m` / `p` / `t` on work | Message / pause or resume / worktree terminal |
 | `r` / `d` / `x` on work | Retry or continue / remove / cancel, when available |
 | `s` | Simulate an incoming source message on Home or Activity |
 | `?` | Full keyboard guide |
 | `q`, Ctrl-C | Detach; workers and polling continue |
+
+Select a task in Work and press `i` to inspect **Task info** in the Home detail pane. It shows when and how the task began, its project/worktree/thread, connection message bodies and saved Slack routing context, queued/accepted/held delivery states, task messages, questions and answers, and chronological transaction history with recorded routing reasons. This history includes older sources outside the recent Activity window. Accepted means delivered to a child turn, not proof it followed the instruction; only recorded decisions are available. Use `j/k`, `Ctrl-U/D`, and `gg/G` to scroll; `i` or Esc returns to progress.
 
 The selected item's available actions are shown above its details. Navigation keys never approve, dismiss, or send anything. Arrow keys and PageUp/PageDown remain optional alternatives; Vim motions do not require them. The old `v` key remains a Home alias, but replies and questions no longer live behind a separate actions screen.
 
