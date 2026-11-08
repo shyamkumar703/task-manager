@@ -215,7 +215,7 @@ private actor FakeAgent: AgentConnection {
     let first = try Store(path: path)
     let existing = try await first.createTask(goal: "Preserve existing task")
     let sqlite = GHProcessRunner(executable: URL(fileURLWithPath: "/usr/bin/sqlite3"))
-    let result = try await sqlite.run(arguments: [path, "DROP TABLE agent_output; DROP TABLE agent_sessions; ALTER TABLE tasks DROP COLUMN archived_at; PRAGMA user_version = 1;"])
+    let result = try await sqlite.run(arguments: [path, "DROP TABLE source_links; DROP TABLE event_context; DROP TABLE agent_output; DROP TABLE agent_sessions; ALTER TABLE tasks DROP COLUMN archived_at; PRAGMA user_version = 1;"])
     #expect(result.exitCode == 0)
     let upgraded = try Store(path: path)
     #expect(try await upgraded.task(existing.id).goal == "Preserve existing task")

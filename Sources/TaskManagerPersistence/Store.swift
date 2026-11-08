@@ -116,7 +116,8 @@ public actor Store {
     }
 
     /// Store an entire fetched page atomically. A future adapter can advance its cursor in this transaction.
-    @discardableResult public func ingest(_ events: [SourceEvent]) throws -> Int {
+    @discardableResult public func ingest(_ events: [SourceEvent], repository: String? = nil, workerKind: WorkerKind = .codex) throws -> Int {
+        let scope = try repository.map { try sourceRepository($0) }
         for event in events {
             for (name, value) in [("integration", event.integration), ("source ID", event.sourceID),
                                   ("revision", event.revision), ("association", event.associationKey), ("body", event.body)] {
@@ -134,28 +135,16 @@ public actor Store {
                     inserted += 1
                     try log(taskID: nil, kind: "event.ingested", detail: "\(event.integration):\(event.sourceID):\(event.revision)")
                 }
+                if let scope {
+                    let row = try db.query("SELECT id FROM events WHERE integration = ? AND source_id = ? AND revision = ?", [event.integration, event.sourceID, event.revision]).first!
+                    let id = row["id"]!
+                    if let existing = try db.query("SELECT repository FROM event_context WHERE event_id = ?", [id]).first {
+                        guard existing["repository"] == scope else { throw ManagerError.conflict("Source event is already scoped to another repository") }
+                    }
+                    try db.execute("INSERT INTO event_context(event_id, repository, worker_kind) VALUES (?, ?, ?) ON CONFLICT(event_id) DO NOTHING", [id, scope, workerKind.rawValue])
+                }
             }
             return inserted
-        }
-    }
-
-    /// Only established associations route automatically. Unknown events await master triage.
-    @discardableResult public func routeKnownEvents() throws -> Int {
-        try db.transaction {
-            let rows = try db.query("""
-                SELECT events.*, tasks.id AS matched_task FROM events
-                JOIN tasks ON tasks.source_key = events.association_key
-                WHERE events.disposition = 'pending' AND tasks.status != 'cancelled' AND tasks.archived_at IS NULL ORDER BY events.id
-                """)
-            for row in rows {
-                let taskID = row["matched_task"]!
-                _ = try insertMessage(taskID: taskID, body: "Source: \(row["url"]!)\n\(row["body"]!)")
-                try db.execute("UPDATE events SET disposition = 'routed', task_id = ? WHERE id = ?", [taskID, row["id"]!])
-                let status = try task(taskID).status
-                if status == .completed || status == .failed { try changeStatus(taskID, to: .queued) }
-                try log(taskID: taskID, kind: "event.routed", detail: "\(row["id"]!): established source association")
-            }
-            return rows.count
         }
     }
 

@@ -4,7 +4,7 @@ import TaskManagerCore
 import TaskManagerPersistence
 
 public enum Daemon {
-    private static let compatibilityVersion = "task-manager-3"
+    private static let compatibilityVersion = "task-manager-4"
     public static func requestStop(stateDirectory: String) throws {
         try Data().write(to: URL(fileURLWithPath: stateDirectory).appendingPathComponent("stop-request"), options: .atomic)
     }
@@ -17,6 +17,7 @@ public enum Daemon {
         let stopFile = URL(fileURLWithPath: stateDirectory).appendingPathComponent("stop-request")
         try? FileManager.default.removeItem(at: stopFile)
         _ = try await store.recoverAgentSessions()
+        try await store.recoverTriage()
         try await store.record(taskID: nil, kind: "coordinator.started", detail: "pid \(ProcessInfo.processInfo.processIdentifier)")
         let coordinator = Coordinator(store: store, stateDirectory: stateDirectory)
         let oldTerm = signal(SIGTERM, SIG_IGN)

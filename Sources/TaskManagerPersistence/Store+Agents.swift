@@ -11,15 +11,17 @@ extension Store {
         guard FileManager.default.fileExists(atPath: path, isDirectory: &directory), directory.boolValue else {
             throw ManagerError.invalid("Repository directory does not exist: \(path)")
         }
-        return try db.transaction {
-            let id = UUID().uuidString
-            let now = timestamp()
-            try db.execute("INSERT INTO tasks(id, goal, status, source_key, created_at, updated_at) VALUES (?, ?, 'queued', NULL, ?, ?)", [id, goal, now, now])
-            try db.execute("INSERT INTO agent_sessions(task_id, repository, kind) VALUES (?, ?, ?)", [id, path, kind.rawValue])
-            try writeOutput(taskID: id, itemID: "goal", kind: "user", text: goal)
-            try log(taskID: id, kind: "task.created", detail: "\(kind.rawValue): \(goal)")
-            return try task(id)
-        }
+        return try db.transaction { try insertAgentTask(goal: goal, repository: path, kind: kind) }
+    }
+
+    func insertAgentTask(goal: String, repository: String, kind: WorkerKind) throws -> ManagedTask {
+        let id = UUID().uuidString
+        let now = timestamp()
+        try db.execute("INSERT INTO tasks(id, goal, status, source_key, created_at, updated_at) VALUES (?, ?, 'queued', NULL, ?, ?)", [id, goal, now, now])
+        try db.execute("INSERT INTO agent_sessions(task_id, repository, kind) VALUES (?, ?, ?)", [id, repository, kind.rawValue])
+        try writeOutput(taskID: id, itemID: "goal", kind: "user", text: goal)
+        try log(taskID: id, kind: "task.created", detail: "\(kind.rawValue): \(goal)")
+        return try task(id)
     }
 
     public func agentSession(taskID: String) throws -> AgentSessionRecord? {

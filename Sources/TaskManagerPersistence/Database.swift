@@ -89,7 +89,7 @@ final class Database {
     private func migrate() throws {
         try transaction {
             let version = try query("PRAGMA user_version").first?["user_version"] ?? "0"
-            guard ["0", "1", "2", "3"].contains(version) else {
+            guard ["0", "1", "2", "3", "4"].contains(version) else {
                 throw ManagerError.storage("Database schema \(version) is newer than this application")
             }
             if version == "0" {
@@ -158,11 +158,30 @@ final class Database {
                     """)
                 try execute("PRAGMA user_version = 2")
             }
-            if version != "3" {
+            if ["0", "1", "2"].contains(version) {
                 try execute("ALTER TABLE tasks ADD COLUMN archived_at TEXT")
                 try execute("ALTER TABLE agent_sessions ADD COLUMN worker_active INTEGER NOT NULL DEFAULT 0 CHECK(worker_active IN (0,1))")
                 try execute("ALTER TABLE agent_sessions ADD COLUMN manual_active INTEGER NOT NULL DEFAULT 0 CHECK(manual_active IN (0,1))")
                 try execute("PRAGMA user_version = 3")
+            }
+            if version != "4" {
+                try execute("""
+                    CREATE TABLE event_context (
+                        event_id INTEGER PRIMARY KEY REFERENCES events(id), repository TEXT NOT NULL,
+                        worker_kind TEXT NOT NULL CHECK(worker_kind IN ('mock','codex')),
+                        reason TEXT, question TEXT, clarification TEXT, last_error TEXT,
+                        attempts INTEGER NOT NULL DEFAULT 0, retry_after REAL NOT NULL DEFAULT 0,
+                        message_id TEXT REFERENCES messages(id)
+                    )
+                    """)
+                try execute("""
+                    CREATE TABLE source_links (
+                        repository TEXT NOT NULL, association_key TEXT NOT NULL,
+                        task_id TEXT NOT NULL REFERENCES tasks(id),
+                        PRIMARY KEY(repository, association_key)
+                    )
+                    """)
+                try execute("PRAGMA user_version = 4")
             }
         }
     }
