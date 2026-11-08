@@ -18,7 +18,7 @@ Agreed decisions:
 
 Use Swift with Swift Package Manager for the application, structured concurrency and actors for coordinator ownership, and SQLite on disk for state. Use separate package targets for domain types, persistence, Codex transport, integrations, coordinator, and TUI. Keep the domain model independent of the terminal library and agent transport. Use Codable types at protocol boundaries and explicit validation for domain invariants.
 
-Select a Swift terminal framework after a small prototype in milestone 1. [SwiftTUI](https://github.com/SwiftTUI/swift-tui) is a candidate, not a committed dependency. Validate keyboard focus, multiline text entry, scrolling streamed output, terminal resize, and terminal restoration after errors before adopting it. Native SwiftUI is not a terminal UI framework.
+The initial TUI uses the system ncurses library through a small C wrapper, with Swift owning its state and task interactions. This keeps the prototype dependency-free and supports keyboard input, multiline composition, output scrolling, resize, and terminal restoration. A larger Swift view framework can be evaluated if the interface outgrows this implementation.
 
 Swift-specific tradeoffs: expect more custom transport/integration code and terminal UI evaluation than with the original Python/Textual proposal. Drain subprocess stdout and stderr concurrently, bound output buffers, and explicitly terminate child processes on cancellation. Actors protect in-memory ownership but do not replace database transactions, durable queues, or crash recovery. Avoid holding a database transaction across an awaited network or agent operation. Keep database operations off UI rendering paths and persist state before broadcasting updates.
 
@@ -35,14 +35,14 @@ GitHub polling -> durable event inbox -> routing/master -> task inboxes
                          |                    |                |
                          +-------------- SQLite --------------+
                                               |                |
-TUI <-> local coordinator API <-> questions/approvals      scheduler
+TUI <-> durable task state/inboxes/questions              scheduler
                                                                |
                                                        Codex workers
                                                                |
                                                        local worktrees
 ```
 
-Run a background coordinator independently of the TUI. Connect over a user-only local Unix socket using a small versioned request/event protocol. Closing the TUI detaches the interface; it does not stop work. Provide explicit commands for coordinator start, status, stop, and TUI attachment. Add optional macOS launchd installation after recovery works; installation is a user action.
+Run a background coordinator independently of the TUI. In the first implementation, the UI writes durable task state and inboxes directly through Store, and the coordinator watches them. A single-owner file lock prevents competing coordinators. Defer a versioned local socket protocol until needed. Closing the TUI detaches the interface; it does not stop work. Provide explicit commands for coordinator start, stop, and TUI attachment. Add optional macOS launchd installation after recovery works; installation is a user action.
 
 The coordinator owns persistence and scheduling. The master is a Codex-backed decision maker invoked for bounded triage batches, with relevant task summaries and read-only source context. It returns schema-validated decisions: create task, append to task, ignore, or request clarification. Code validates and applies decisions transactionally. The master cannot directly spawn untracked processes or mutate external systems.
 
@@ -76,7 +76,7 @@ Recovery procedure:
 
 1. Acquire a single-coordinator lock; reconcile expired worker leases and any surviving child processes before assigning ownership.
 2. Validate recorded worktrees without deleting or resetting user changes.
-3. Inspect saved Codex threads and resume interrupted work with outstanding inbox messages and persisted context. If a thread cannot be resumed, start a replacement from the saved goal, journal, artifacts, and current diff; show that recovery in the TUI.
+3. Reopen interrupted work paused for inspection. On user resume, continue its saved Codex thread with outstanding inbox messages and persisted context. If resume fails, show the error and preserve the worktree/inbox; a future explicit thread-replacement operation can rebuild context from saved artifacts.
 4. Reconcile uncertain external action attempts before retrying. Never blindly replay a push or posted comment.
 5. Restore unanswered questions and approval proposals. Runtime-specific request IDs from a dead process are not reusable; recreate the interaction when necessary.
 6. Catch up integrations with pagination and overlap, then resume scheduling within configured limits.
@@ -100,9 +100,9 @@ Implement a central action broker. A proposal contains the exact operation, dest
 
 The first release supports a proposed GitHub comment as the initial approved write operation. Push, merge, PR creation, issue mutation, Slack messages, and other writes remain unavailable until implemented through the same broker. An approved comment is sent by the coordinator, not by giving the child a write credential.
 
-Enforce the boundary beyond prompts: workers receive no GitHub write credentials, no inherited authenticated connectors, and no unrestricted network access. Use a dedicated Codex configuration and a validated sandbox/environment. Keep read credentials in the coordinator. Do not rely on a git hook or a list of forbidden shell command names to prevent publication. External requests made by repository scripts are subject to the same boundary. Local destructive or elevated commands can also require an execution approval, separately from external publication approval.
+The user subsequently selected full-access Codex workers with runtime approvals disabled. The manual-worker prototype uses that policy and instructs children to work locally without publishing or mutating external systems. The application's publication executor remains unavailable. Full-access commands are not constrained by an OS-enforced external-action boundary; instruction compliance is required in this mode.
 
-Validate this isolation on the target laptop in milestone 1. If the available runtime cannot enforce it, restrict workers to mediated tools or add an isolated execution environment before enabling autonomous repository commands. Treat repository code and incoming comments as untrusted inputs; they cannot authorize external actions or change approval policy.
+If a hard approval boundary becomes necessary, add a mediated/credential-isolated mode before claiming it is enforced. A git hook or forbidden-command list is insufficient. Treat repository code and incoming comments as untrusted inputs; they do not authorize publication or policy changes.
 
 ## GitHub first workflow
 
@@ -141,17 +141,19 @@ Adapters implement polling, normalization, context lookup, cursor handling, heal
 
 ## Delivery milestones and acceptance criteria
 
-### 1. Runtime and boundary proof
+### 1. Runtime and terminal foundation
 
-Scaffold the Swift package and verify the installed Codex protocol. Prototype the terminal interaction requirements and select a TUI library. Demonstrate start, streamed progress, question handling, interruption, and resume after process termination. Validate subprocess output handling and cancellation alongside worker sandboxing, credential isolation, and blocked external writes, including writes attempted through repository commands. Record Swift/macOS/Codex version requirements and any platform limitations. This milestone gates autonomous execution.
+Scaffold the Swift package and verify the installed Codex protocol. Prototype the terminal interactions and select the terminal implementation. Demonstrate start, streamed progress, question handling, interruption, and saved-thread resume. Validate subprocess output handling and cancellation. Record Swift/macOS/Codex version requirements and the explicitly selected full-access execution policy. Keep automatic source-driven execution separate until the manual workflow works.
 
 ### 2. Durable coordinator
 
-Implement schema/migrations, event inbox, journal, task state machine, task messages, worker ownership, and local client protocol. Use fake integrations and workers. Demonstrate recovery from a forced coordinator kill without losing committed events, task ownership, or pending questions. Repeated input must not create duplicate tasks.
+Implement schema/migrations, event inbox, journal, task state machine, task messages, persisted sessions/transcripts, and single-coordinator ownership. Use fake integrations and workers. Demonstrate recovery from a forced coordinator kill without losing committed events, thread/workspace identity, or pending questions. Interrupted tasks recover paused. Repeated input must not create duplicate tasks.
 
 ### 3. TUI and manual Codex tasks
 
 Attach/detach the TUI, run a manually created task through the worker, answer a question, send follow-up information, pause/resume, and inspect completion. Verify two workers can progress while a third waits for input, within configured concurrency. Closing and reopening the TUI must preserve work.
+
+The immediate product milestone is this manual UI loop, before live source testing. Support a mock worker alongside real Codex so interaction tests do not depend on a source integration or model calls.
 
 ### 4. GitHub ingestion and proactive routing
 

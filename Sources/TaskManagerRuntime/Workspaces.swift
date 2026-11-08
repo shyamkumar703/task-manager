@@ -18,6 +18,14 @@ public struct Workspaces: Sendable {
             guard result.exitCode == 0, URL(fileURLWithPath: root).resolvingSymlinksInPath().path == URL(fileURLWithPath: workspace).resolvingSymlinksInPath().path else {
                 throw ManagerError.conflict("Existing workspace could not be reconciled: \(workspace)")
             }
+            let expected = try await runner.run(arguments: ["-C", repository, "rev-parse", "--path-format=absolute", "--git-common-dir"])
+            let actual = try await runner.run(arguments: ["-C", workspace, "rev-parse", "--path-format=absolute", "--git-common-dir"])
+            let branch = try await runner.run(arguments: ["-C", workspace, "branch", "--show-current"])
+            guard expected.exitCode == 0, actual.exitCode == 0, branch.exitCode == 0,
+                  expected.stdout == actual.stdout,
+                  String(decoding: branch.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == "task-manager/\(taskID)" else {
+                throw ManagerError.conflict("Existing workspace belongs to a different repository or task branch")
+            }
             return workspace
         }
         let result = try await runner.run(arguments: ["-C", repository, "worktree", "add", "-b", "task-manager/\(taskID)", workspace, "HEAD"])

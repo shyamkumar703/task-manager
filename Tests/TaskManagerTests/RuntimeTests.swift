@@ -100,18 +100,25 @@ private actor FakeAgent: AgentConnection {
     private(set) var methods: [String] = []
     private(set) var steered: JSONValue?
     let raceOnSteer: Bool
+    let completeOnStart: Bool
 
-    init(raceOnSteer: Bool = false) {
+    init(raceOnSteer: Bool = false, completeOnStart: Bool = false) {
         let pair = AsyncStream<CodexClient.Event>.makeStream()
         events = pair.stream; continuation = pair.continuation
         self.raceOnSteer = raceOnSteer
+        self.completeOnStart = completeOnStart
     }
     func connect() {}
     func request(_ method: String, params: JSONValue) async throws -> JSONValue {
         methods.append(method)
         switch method {
         case "thread/start", "thread/resume": return .object(["thread": .object(["id": .string("thread-1")])])
-        case "turn/start": return .object(["turn": .object(["id": .string("turn-1")])])
+        case "turn/start":
+            if completeOnStart {
+                complete()
+                try await Task.sleep(for: .milliseconds(30))
+            }
+            return .object(["turn": .object(["id": .string("turn-1")])])
         case "turn/steer":
             steered = params
             if raceOnSteer {
@@ -181,4 +188,98 @@ private actor FakeAgent: AgentConnection {
     #expect(TerminalText.assistantText("{\"status\":") == "Writing response…")
     #expect(!TerminalText.clean("hello\u{1B}[31m\u{07}world").contains("\u{1B}"))
     #expect(TerminalText.wrap("abcd\nef", width: 3) == ["abc", "d", "ef"])
+}
+
+@Test func worktreeRecoveryVerifiesOwnershipAndPreservesDirtyCheckout() async throws {
+    let root = try runtimeDirectory()
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    let repository = root + "/repo"
+    let other = root + "/other"
+    try await gitRepository(at: repository)
+    try await gitRepository(at: other)
+    try Data("User's uncommitted content".utf8).write(to: URL(fileURLWithPath: repository + "/scratch.txt"))
+    let workspaces = Workspaces(stateDirectory: root + "/state")
+    let id = UUID().uuidString
+    let workspace = try await workspaces.prepare(taskID: id, repository: repository)
+    #expect(workspace != repository)
+    #expect(try await workspaces.prepare(taskID: id, repository: repository) == workspace)
+    await #expect(throws: ManagerError.self) { try await workspaces.prepare(taskID: id, repository: other) }
+    #expect(try String(contentsOfFile: repository + "/scratch.txt", encoding: .utf8) == "User's uncommitted content")
+    #expect(!FileManager.default.fileExists(atPath: workspace + "/scratch.txt"))
+}
+
+@Test func schemaOneMigratesWithoutLosingExistingTasks() async throws {
+    let root = try runtimeDirectory()
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    let path = root + "/state.sqlite"
+    let first = try Store(path: path)
+    let existing = try await first.createTask(goal: "Preserve existing task")
+    let sqlite = GHProcessRunner(executable: URL(fileURLWithPath: "/usr/bin/sqlite3"))
+    let result = try await sqlite.run(arguments: [path, "DROP TABLE agent_output; DROP TABLE agent_sessions; PRAGMA user_version = 1;"])
+    #expect(result.exitCode == 0)
+    let upgraded = try Store(path: path)
+    #expect(try await upgraded.task(existing.id).goal == "Preserve existing task")
+    let new = try await upgraded.createAgentTask(goal: "New agent task", repository: root, kind: .mock)
+    #expect(try await upgraded.agentSession(taskID: new.id)?.kind == .mock)
+}
+
+@Test func pausingMockStopsProgressUntilResumed() async throws {
+    let root = try runtimeDirectory()
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    let store = try Store(path: root + "/state.sqlite")
+    let coordinator = Coordinator(store: store, stateDirectory: root, mockInterval: .milliseconds(40))
+    let task = try await store.createAgentTask(goal: "Pause me", repository: root, kind: .mock)
+    try await coordinator.tick()
+    try await until("first step") { try await store.agentSession(taskID: task.id)?.threadID == "mock:1" }
+    try await store.transition(task.id, to: .paused)
+    try await coordinator.tick()
+    try await Task.sleep(for: .milliseconds(60))
+    let step = try await store.agentSession(taskID: task.id)?.threadID
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(try await store.agentSession(taskID: task.id)?.threadID == step)
+    #expect(try await store.task(task.id).status == .paused)
+    try await store.resume(task.id)
+    try await coordinator.tick()
+    try await until("resumed progress") { try await store.agentSession(taskID: task.id)?.threadID != step }
+    await coordinator.shutdown()
+}
+
+private final class FakeAgentQueue: @unchecked Sendable {
+    private let lock = NSLock()
+    private var agents: [FakeAgent]
+    init(_ agents: [FakeAgent]) { self.agents = agents }
+    func next() -> any AgentConnection {
+        lock.lock()
+        defer { lock.unlock() }
+        return agents.removeFirst()
+    }
+}
+
+@Test func pauseInterruptsCodexAndResumeUsesSavedThreadWithEagerCompletion() async throws {
+    let root = try runtimeDirectory()
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    let repository = root + "/repo"
+    try await gitRepository(at: repository)
+    let store = try Store(path: root + "/state.sqlite")
+    let first = FakeAgent()
+    let second = FakeAgent(completeOnStart: true)
+    let queue = FakeAgentQueue([first, second])
+    let coordinator = Coordinator(store: store, stateDirectory: root, factory: { queue.next() })
+    let task = try await store.createAgentTask(goal: "Pause and continue", repository: repository, kind: .codex)
+    try await coordinator.tick()
+    try await until("first active turn") { try await store.agentSession(taskID: task.id)?.turnID == "turn-1" }
+    try await store.transition(task.id, to: .paused)
+    try await coordinator.tick()
+    try await until("interruption persisted") { try await store.agentSession(taskID: task.id)?.turnID == nil }
+    #expect(await first.methods.contains("turn/interrupt"))
+    _ = try await store.addMessage(taskID: task.id, body: "Continue with this update")
+    try await store.resume(task.id)
+    try await until("resumed completion") {
+        try await coordinator.tick()
+        return try await store.task(task.id).status == .completed
+    }
+    #expect(await second.methods.contains("thread/resume"))
+    #expect(try await store.agentSession(taskID: task.id)?.threadID == "thread-1")
+    #expect(try await store.messages(taskID: task.id, pendingOnly: true).isEmpty)
+    await coordinator.shutdown()
 }

@@ -41,7 +41,7 @@ public actor Coordinator {
         let statuses = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0.status) })
         for id in Array(active.keys) {
             guard let run = active[id], !run.stopping else { continue }
-            if statuses[id] == .paused || statuses[id] == .cancelled {
+            if statuses[id] == .paused || statuses[id] == .cancelled || (statuses[id] == .queued && !run.starting) {
                 run.stopping = true
                 Task { await self.halt(id, generation: run.generation) }
             } else if run.kind == .codex, !run.starting, !run.delivering, run.turnID != nil {

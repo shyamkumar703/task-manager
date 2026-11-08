@@ -12,15 +12,7 @@ Initial validation: 18 Swift Testing tests and the offline CLI smoke test. Durin
 
 The original restricted session could not create commits: Git initialization and later `.git/index.lock` writes were denied. The user subsequently restarted with full access; the foundation is now committed as `a6c54fd`. No Git metadata was relocated and nothing was pushed.
 
-Next work, in dependency order:
-
-1. Complete live Codex thread/turn lifecycle, recovery, and execution-policy validation. Startup and initialization are verified; agent execution is not yet implemented.
-2. Prototype and select the Swift TUI framework, including focus, multiline input, streamed output, resize, and terminal restoration.
-3. Add the independent coordinator process, single-owner lock, versioned local socket protocol, worker leases, persisted runs, crash reconciliation, and TUI attachment.
-4. Add configured GitHub scopes, bootstrap baselines/cursors/backoff, bounded master triage, and worktree execution against the supplied test repository.
-5. Connect questions and manual steering to workers, then implement approval-bound publication with remote-state checks and ambiguous-result recovery.
-
-The implementation plan remains the acceptance checklist. These foundations do not complete its runtime, coordinator, TUI, or end-to-end workflow milestones.
+The implementation plan remains the acceptance checklist. The initial foundation preceded the manual UI/worker implementation described below.
 
 ## Test checkout validation
 
@@ -37,3 +29,21 @@ After the user restarted with full access, Git staging/committing, GitHub connec
 Replaced direct URLSession HTTP with `gh api`, reusing gh authentication. Added a finite subprocess runner with simultaneous stdout/stderr draining, bounded stdout, cancellation, and timeout. The transport explicitly selects GitHub.com and GET, preserves status/retry/pagination headers even on HTTP errors, and never passes credentials as command arguments. Added `github-prs OWNER/REPO AUTHOR` for live discovery checks.
 
 Validation: 24 tests passed. The application's `github-prs shyamkumar703/todo_list_test_task_manager shyamkumar703` command successfully contacted GitHub and returned an empty list, consistent with `gh pr list`. No open PR exists to exercise real feedback ingestion. The live `codex-probe` handshake passed without creating an agent thread. Reran the repository-local persistence/routing smoke test successfully; retained evidence at `.task-manager-state/run.Pn8uwm/` in the test checkout. No remote changes were made.
+
+## Manual UI and child workers
+
+The user prioritized interaction testing before live PR/source workflows. Implemented a Swift/ncurses TUI with task creation, task selection, conversation output, message delivery badges, question answering, pause/resume, retry, cancellation, and runtime selection. The TUI starts/attaches a background coordinator and can detach while workers continue. SQLite is the local coordination boundary for this prototype; a socket protocol is deferred.
+
+Mock workers exercise progress, follow-ups, and questions without model calls. Real Codex workers use isolated worktrees, persisted threads, structured question/completion outcomes, and in-flight `turn/steer`. Messages acknowledge only after runtime acceptance; a completion/steering race preserves the pending message for the next turn. Pause interrupts a turn; resume uses the saved thread. Cold coordinator recovery pauses interrupted tasks for inspection. Schema v2 adds sessions and transcripts and upgrades v1 databases without discarding task state.
+
+Committed the first UI/runtime implementation as `32e5f6b`. Subsequent hardening checks worktree repository/branch ownership, pause/resume behavior, schema upgrades, and completion-before-response races.
+
+Validation:
+
+- **34 automated tests pass**, including coordinator ownership, transcript/session durability, peer progress while another worker waits, live-driver steering with a fake transport, deferred delivery races, mock pause/resume, Codex interruption and saved-thread resume, eager completion, schema migration, and worktree ownership/dirty-checkout preservation.
+- **Real TUI/Codex test passed:** created a child from the UI against the todo-list test repo; sent a follow-up while its `sleep 20` command was running; saw it accepted; the child changed its outcome to a question; answered through the UI; the same thread resumed to completion with no pending messages. No child file changes or remote mutations occurred. Evidence: `.state/ui-live/RESULTS.txt` and its database.
+- **TUI detachment passed:** detached while a mock worker was running; it continued to completion in the background.
+- **Forced process crash passed:** killed a coordinator during a running mock task, saved a message while stopped, restarted, and verified the task reopened paused with the message still pending. Evidence: `.state/recovery-smoke/RESULTS.txt` and its database.
+- Original offline smoke test and test-checkout smoke test pass. Latest checkout evidence: `.task-manager-state/run.syPsvU/`.
+
+Remaining product work: user testing/refinement of the manual UI, automatic master triage, continuous source polling/baselines/backoff, structured external action proposals from workers, publication with explicit approval/reconciliation, online backup/log rotation, stronger subprocess-tree recovery, and optional launchd management. Full-access workers are instructed not to publish; that is not an OS-enforced barrier.

@@ -90,6 +90,7 @@ struct TaskManagerCLI {
             try count(1)
             try output(await store.task(args[0]))
             try output(await store.messages(taskID: args[0]))
+            if let session = try await store.agentSession(taskID: args[0]) { try output(session) }
         case "status":
             try count(2)
             guard let status = TaskStatus(rawValue: args[1]) else { throw ManagerError.invalid("Invalid task status") }

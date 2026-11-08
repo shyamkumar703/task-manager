@@ -2,11 +2,11 @@
 
 A local autonomous task manager, implemented in Swift. See [SPEC.md](SPEC.md) and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the intended system.
 
-The current implementation is the foundation: durable task state, questions and answers, incoming event deduplication and routing, local action proposals, a Codex stdio client, and a read-only GitHub adapter. Background scheduling, autonomous triage/workers, worktree management, and the TUI are not yet enabled. The CLI exercises the core while those components are built.
+The current implementation supports manually driven child workers through a TUI: create tasks, watch progress, send messages during a turn, answer questions, and pause/resume work. A background coordinator owns the workers and durable SQLite state. Tasks can use a mock worker or real Codex in an isolated git worktree. GitHub reads are available separately; automatic source polling and master-agent triage are still to come.
 
 ## Build and verify
 
-Requires macOS 14 or later and Swift 6.2 or later. Tested with Swift 6.2.4. There are no third-party package dependencies; SQLite is linked from the system SDK.
+Requires macOS 14 or later and Swift 6.2 or later. Tested with Swift 6.2.4 and Codex CLI 0.167.0. There are no third-party package dependencies; SQLite and ncurses are linked from the system SDK.
 
 ```sh
 ./scripts/test.sh
@@ -26,7 +26,53 @@ To exercise the core from the actual test checkout, leaving an inspectable datab
 
 Each run creates `.task-manager-state/run.XXXXXX/` in that checkout. `RESULTS.txt` records the checks and IDs; `state/state.sqlite` contains the persisted data. The fixture is synthetic, so this does not require a real PR or run an agent. Ignore `.task-manager-state/` in the test repository.
 
-## Local walkthrough
+## Try the TUI first
+
+From this repository, launch with the todo-list checkout as the repository for new tasks:
+
+```sh
+.build/debug/task-manager --state-dir .state/dev tui \
+  /Users/shyamkumar/Developer/todo_list_task_manager_test
+```
+
+The TUI starts or attaches to a coordinator for that state directory. It opens in **MOCK** mode: tasks make progress, apply inbox messages, ask a question after four steps, and continue when answered. Mock workers do not call a model or change files.
+
+| Key | Action |
+| --- | --- |
+| `n` | Enter a goal and create a task |
+| `m` | Send a follow-up to the selected child |
+| `a` | Answer the selected child's pending question |
+| `p` | Pause or resume the selected child |
+| `r` | Retry/continue a completed, failed, or paused task |
+| `x` | Cancel the selected task, preserving its local work |
+| `Tab` | Switch new tasks between MOCK and CODEX |
+| Up/Down or `j`/`k` | Select a task |
+| PageUp/PageDown | Scroll its conversation |
+| `q` or Ctrl-C | Detach the UI; workers continue |
+
+In an input form, Enter sends, Ctrl-N inserts a newline, and Esc cancels. Resize is handled by ncurses; the minimum layout is 76 columns by 16 rows. Transcript controls are stripped before rendering.
+
+To exercise a **real child**, press Tab to select CODEX and then `n`. Try this goal:
+
+> Read SPEC.md without changing files, then ask me which command name the todo CLI should use.
+
+Answer with `a`; it resumes the same saved Codex thread. To test in-flight updates, start a task that takes some time (for example, ask it to run `sleep 20` before inspecting the spec), then send an instruction with `m`. Messages show QUEUED until Codex accepts `turn/steer`, then ACCEPTED. A message that loses the race with turn completion remains queued for the next turn.
+
+Real coding tasks get branches named `task-manager/TASK_ID` and worktrees under the state directory's `worktrees/`. The user's original checkout and uncommitted changes are preserved; work starts from committed HEAD. Use `show TASK_ID` to see the full workspace path and thread ID, and inspect that worktree with git as needed. Completed worktrees are retained.
+
+The coordinator runs up to two workers at once. Waiting for a question releases the worker slot. Closing the UI keeps the coordinator alive; reopen the same command to reattach. To stop it deliberately:
+
+```sh
+.build/debug/task-manager --state-dir .state/dev coordinator-stop
+```
+
+Stopping pauses active work. After a coordinator crash, previously running tasks reopen **paused** for inspection; press `p` to resume using their saved workspace, thread, transcript, and inbox. The UI and coordinator currently coordinate through SQLite, avoiding an additional socket protocol for this prototype.
+
+Codex workers use full access and no runtime approval prompts, as requested. They are instructed to work locally and not publish or mutate external systems. That instruction is not a sandbox-enforced guarantee. The application's external action executor remains disabled.
+
+For scripts or a separate terminal, `serve` runs the coordinator in the foreground, `agent-add mock|codex REPO GOAL` queues a task, and `transcript TASK_ID` prints saved output. These use the same state and workers as the UI.
+
+## Core CLI walkthrough
 
 Use `.state` for disposable development state. The default persistent location is `~/Library/Application Support/AutonomousTaskManager`; `TASK_MANAGER_STATE_DIR` or `--state-dir` overrides it.
 
@@ -51,7 +97,7 @@ Copy the task ID from the JSON output:
 .build/debug/task-manager --state-dir .state journal
 ```
 
-Status changes here are manual state transitions; setting a task to `running` does not launch an agent. An answer creates a durable inbox message and requeues only the affected task. Answering while paused preserves the pause. `resume TASK_ID` restores a pending question when necessary. Cancelled tasks retain history and reject new messages and approvals.
+The `add` command above creates an unbound task for exercising storage/routing; it does not launch an agent. Use the TUI or `agent-add` to create worker-bound tasks. An answer creates a durable inbox message and requeues only the affected task. Answering while paused preserves the pause. `resume TASK_ID` restores a pending question when necessary. Cancelled tasks retain history and reject new messages and approvals.
 
 ## GitHub reads
 
@@ -71,7 +117,7 @@ Authentication stays in `gh`, which uses your saved login or its supported token
 
 Repeated imports deduplicate identical revisions. Established task source associations route automatically. Unknown associations remain pending for future master triage. This manual command imports history; automatic first-run baselining and continuous polling are still to come.
 
-The test checkout is `/Users/shyamkumar/Developer/todo_list_task_manager_test`, with remote `shyamkumar703/todo_list_test_task_manager`. The task manager does not modify application code in that checkout in this release.
+The test checkout is `/Users/shyamkumar/Developer/todo_list_task_manager_test`, with remote `shyamkumar703/todo_list_test_task_manager`. Real Codex tasks modify their own worktrees; the mock/fixture tests do not modify application code.
 
 ## Codex connection check
 
