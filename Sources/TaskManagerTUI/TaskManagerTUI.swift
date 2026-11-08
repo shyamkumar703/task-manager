@@ -136,6 +136,29 @@ public final class TaskManagerTUI {
             if task.status == .paused { try await store.resume(task.id); notice = "Task resumed" }
             else { try await store.transition(task.id, to: .paused); notice = "Pausing task…" }
             try await reload()
+        case 116:
+            guard let id = selectedID else { return }
+            notice = "Pausing child and opening its worktree terminal…"
+            draw()
+            let handoff = try await ManualTerminal.prepare(store: store, taskID: id)
+            tm_terminal_close()
+            do {
+                _ = try await ManualTerminal.runShell(session: handoff)
+                try await store.releaseTerminal(taskID: id)
+                notice = "Returned from terminal. Press p to resume a paused child."
+            } catch {
+                try? await store.releaseTerminal(taskID: id)
+                notice = "Terminal error: \(error)"
+            }
+            tm_terminal_reclaim_foreground()
+            guard tm_terminal_open() == 0 else { running = false; throw ManagerError.invalid("Could not restore terminal UI") }
+            try await reload()
+        case 100:
+            guard let id = selectedID else { return }
+            try await store.archive(id)
+            notice = "Task removed from list; history and worktree retained."
+            scroll = 0
+            try await reload()
         case 120:
             guard let id = selectedID else { return }
             try await store.transition(id, to: .cancelled); notice = "Task cancelled; local work preserved"
@@ -210,8 +233,8 @@ public final class TaskManagerTUI {
             for (offset, line) in lines.suffix(2).enumerated() { draw(rows - 3 + offset, 1, line, width: columns - 2) }
         } else {
             draw(rows - 4, 1, notice, width: columns - 2)
-            draw(rows - 3, 1, "n new · m message · a answer · p pause/resume · r retry · x cancel · Tab runtime", width: columns - 2)
-            draw(rows - 2, 1, "↑↓/jk select · PgUp/PgDn scroll · q detach (workers continue)", width: columns - 2)
+            draw(rows - 3, 1, "n new · m msg · a answer · p pause/resume · t terminal · d remove", width: columns - 2)
+            draw(rows - 2, 1, "r retry · x cancel · Tab runtime · ↑↓/jk select · PgUp/Dn scroll · q detach", width: columns - 2)
         }
         tm_terminal_refresh()
     }

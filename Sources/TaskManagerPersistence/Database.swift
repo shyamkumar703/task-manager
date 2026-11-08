@@ -89,7 +89,7 @@ final class Database {
     private func migrate() throws {
         try transaction {
             let version = try query("PRAGMA user_version").first?["user_version"] ?? "0"
-            guard ["0", "1", "2"].contains(version) else {
+            guard ["0", "1", "2", "3"].contains(version) else {
                 throw ManagerError.storage("Database schema \(version) is newer than this application")
             }
             if version == "0" {
@@ -141,7 +141,7 @@ final class Database {
             ]
             for statement in statements { try execute(statement) }
             }
-            if version != "2" {
+            if ["0", "1"].contains(version) {
                 try execute("""
                     CREATE TABLE agent_sessions (
                         task_id TEXT PRIMARY KEY REFERENCES tasks(id), repository TEXT NOT NULL,
@@ -157,6 +157,12 @@ final class Database {
                     )
                     """)
                 try execute("PRAGMA user_version = 2")
+            }
+            if version != "3" {
+                try execute("ALTER TABLE tasks ADD COLUMN archived_at TEXT")
+                try execute("ALTER TABLE agent_sessions ADD COLUMN worker_active INTEGER NOT NULL DEFAULT 0 CHECK(worker_active IN (0,1))")
+                try execute("ALTER TABLE agent_sessions ADD COLUMN manual_active INTEGER NOT NULL DEFAULT 0 CHECK(manual_active IN (0,1))")
+                try execute("PRAGMA user_version = 3")
             }
         }
     }

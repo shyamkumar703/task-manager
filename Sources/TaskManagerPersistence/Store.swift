@@ -14,14 +14,14 @@ public actor Store {
         return try db.transaction {
             let id = UUID().uuidString
             let now = timestamp()
-            try db.execute("INSERT INTO tasks VALUES (?, ?, 'queued', ?, ?, ?)", [id, goal, sourceKey, now, now])
+            try db.execute("INSERT INTO tasks(id, goal, status, source_key, created_at, updated_at) VALUES (?, ?, 'queued', ?, ?, ?)", [id, goal, sourceKey, now, now])
             try log(taskID: id, kind: "task.created", detail: goal)
             return try task(id)
         }
     }
 
-    public func tasks() throws -> [ManagedTask] {
-        try db.query("SELECT * FROM tasks ORDER BY created_at, id").map(decodeTask)
+    public func tasks(includeArchived: Bool = false) throws -> [ManagedTask] {
+        try db.query("SELECT * FROM tasks" + (includeArchived ? "" : " WHERE archived_at IS NULL") + " ORDER BY created_at, id").map(decodeTask)
     }
 
     public func task(_ id: String) throws -> ManagedTask {
@@ -47,6 +47,7 @@ public actor Store {
         try requireText(body, name: "Message")
         return try db.transaction {
             let task = try task(taskID)
+            guard task.archivedAt == nil else { throw ManagerError.conflict("Task is archived; restore it first") }
             guard task.status != .cancelled else { throw ManagerError.conflict("Task is cancelled") }
             let id = try insertMessage(taskID: taskID, body: body)
             if task.status == .completed || task.status == .failed {
@@ -87,7 +88,7 @@ public actor Store {
     }
 
     public func questions(pendingOnly: Bool = true) throws -> [Question] {
-        try db.query("SELECT questions.* FROM questions JOIN tasks ON tasks.id = questions.task_id" + (pendingOnly ? " WHERE answer IS NULL AND tasks.status != 'cancelled'" : "") + " ORDER BY questions.rowid").map {
+        try db.query("SELECT questions.* FROM questions JOIN tasks ON tasks.id = questions.task_id" + (pendingOnly ? " WHERE answer IS NULL AND tasks.status != 'cancelled' AND tasks.archived_at IS NULL" : "") + " ORDER BY questions.rowid").map {
             var values: [String: Any] = ["id": $0["id"]!, "taskID": $0["task_id"]!, "prompt": $0["prompt"]!]
             if let answer = $0["answer"] { values["answer"] = answer }
             return try decode(Question.self, values)
@@ -103,6 +104,7 @@ public actor Store {
             guard row["answer"] == nil else { throw ManagerError.conflict("Question has already been answered") }
             let taskID = row["task_id"]!
             let current = try task(taskID)
+            guard current.archivedAt == nil else { throw ManagerError.conflict("Task is archived; restore it first") }
             guard current.status == .waitingForUser || current.status == .paused else {
                 throw ManagerError.conflict("Task no longer accepts an answer")
             }
@@ -143,7 +145,7 @@ public actor Store {
             let rows = try db.query("""
                 SELECT events.*, tasks.id AS matched_task FROM events
                 JOIN tasks ON tasks.source_key = events.association_key
-                WHERE events.disposition = 'pending' AND tasks.status != 'cancelled' ORDER BY events.id
+                WHERE events.disposition = 'pending' AND tasks.status != 'cancelled' AND tasks.archived_at IS NULL ORDER BY events.id
                 """)
             for row in rows {
                 let taskID = row["matched_task"]!
@@ -172,6 +174,7 @@ public actor Store {
             throw ManagerError.invalid("Target must be an https://github.com/OWNER/REPO/pull/NUMBER URL")
         }
         return try db.transaction {
+            guard try task(taskID).archivedAt == nil else { throw ManagerError.conflict("Task is archived; restore it first") }
             guard try task(taskID).status != .cancelled else { throw ManagerError.conflict("Task is cancelled") }
             let id = UUID().uuidString
             try db.execute("INSERT INTO proposals VALUES (?, ?, 'github.comment', ?, ?, ?, 'pending')", [id, taskID, target, body, expectedHead])
@@ -194,6 +197,7 @@ public actor Store {
                 throw ManagerError.notFound("Unknown proposal: \(proposalID)")
             }
             guard row["status"] == "pending" else { throw ManagerError.conflict("Proposal already decided") }
+            guard try task(row["task_id"]!).archivedAt == nil else { throw ManagerError.conflict("Task is archived; restore it first") }
             guard try task(row["task_id"]!).status != .cancelled else { throw ManagerError.conflict("Task is cancelled") }
             let status = approve ? "approved" : "rejected"
             try db.execute("UPDATE proposals SET status = ? WHERE id = ?", [status, proposalID])
@@ -211,6 +215,7 @@ public actor Store {
 
     func changeStatus(_ id: String, to status: TaskStatus) throws {
         let current = try task(id)
+        guard current.archivedAt == nil else { throw ManagerError.conflict("Task is archived; restore it first") }
         guard current.status.canTransition(to: status) else {
             throw ManagerError.conflict("Cannot transition \(current.status.rawValue) to \(status.rawValue)")
         }
@@ -240,6 +245,7 @@ public actor Store {
 
     private func decodeTask(_ row: [String: String]) throws -> ManagedTask {
         var values: [String: Any] = ["id": row["id"]!, "goal": row["goal"]!, "status": row["status"]!, "createdAt": row["created_at"]!, "updatedAt": row["updated_at"]!]
+        if let archived = row["archived_at"] { values["archivedAt"] = archived }
         if let source = row["source_key"] { values["sourceKey"] = source }
         return try decode(ManagedTask.self, values)
     }

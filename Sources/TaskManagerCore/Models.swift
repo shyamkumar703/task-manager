@@ -23,6 +23,7 @@ public struct ManagedTask: Codable, Sendable, Identifiable, Equatable {
     public let sourceKey: String?
     public let createdAt: String
     public let updatedAt: String
+    public let archivedAt: String?
 }
 
 public struct TaskMessage: Codable, Sendable, Identifiable {
@@ -107,6 +108,8 @@ public struct AgentSessionRecord: Codable, Sendable {
     public let kind: WorkerKind
     public let threadID: String?
     public let turnID: String?
+    public let workerActive: Bool
+    public let manualActive: Bool
 }
 
 public struct AgentOutput: Codable, Sendable, Identifiable {

@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <errno.h>
 #include <locale.h>
+#include <signal.h>
+#include <termios.h>
 #include <ncurses.h>
 #include <wchar.h>
 #include <string.h>
@@ -67,3 +69,18 @@ int tm_key_page_up(void) { return KEY_PPAGE; }
 int tm_key_page_down(void) { return KEY_NPAGE; }
 int tm_key_backspace(void) { return KEY_BACKSPACE; }
 int tm_key_resize(void) { return KEY_RESIZE; }
+
+int tm_terminal_give_foreground(int process_group) {
+    struct sigaction ignored = {0}, previous;
+    ignored.sa_handler = SIG_IGN;
+    sigemptyset(&ignored.sa_mask);
+    sigaction(SIGTTOU, &ignored, &previous);
+    int result = tcsetpgrp(STDIN_FILENO, process_group);
+    sigaction(SIGTTOU, &previous, NULL);
+    return result;
+}
+
+void tm_terminal_reclaim_foreground(void) {
+    tm_terminal_give_foreground(getpgrp());
+    tcflush(STDIN_FILENO, TCIFLUSH);
+}

@@ -14,7 +14,7 @@ extension Store {
         return try db.transaction {
             let id = UUID().uuidString
             let now = timestamp()
-            try db.execute("INSERT INTO tasks VALUES (?, ?, 'queued', NULL, ?, ?)", [id, goal, now, now])
+            try db.execute("INSERT INTO tasks(id, goal, status, source_key, created_at, updated_at) VALUES (?, ?, 'queued', NULL, ?, ?)", [id, goal, now, now])
             try db.execute("INSERT INTO agent_sessions(task_id, repository, kind) VALUES (?, ?, ?)", [id, path, kind.rawValue])
             try writeOutput(taskID: id, itemID: "goal", kind: "user", text: goal)
             try log(taskID: id, kind: "task.created", detail: "\(kind.rawValue): \(goal)")
@@ -24,7 +24,7 @@ extension Store {
 
     public func agentSession(taskID: String) throws -> AgentSessionRecord? {
         guard let row = try db.query("SELECT * FROM agent_sessions WHERE task_id = ?", [taskID]).first else { return nil }
-        var object: [String: Any] = ["taskID": taskID, "repository": row["repository"]!, "kind": row["kind"]!]
+        var object: [String: Any] = ["taskID": taskID, "repository": row["repository"]!, "kind": row["kind"]!, "workerActive": row["worker_active"] == "1", "manualActive": row["manual_active"] == "1"]
         for (column, key) in [("workspace", "workspace"), ("thread_id", "threadID"), ("turn_id", "turnID")] {
             if let value = row[column] { object[key] = value }
         }
@@ -82,6 +82,7 @@ extension Store {
                 try db.execute("UPDATE agent_sessions SET turn_id = NULL WHERE task_id = ?", [id])
                 try log(taskID: id, kind: "agent.recovered", detail: "Paused after coordinator restart; thread, workspace, and inbox preserved")
             }
+            try db.execute("UPDATE agent_sessions SET worker_active = 0, turn_id = NULL")
             return rows.count
         }
     }

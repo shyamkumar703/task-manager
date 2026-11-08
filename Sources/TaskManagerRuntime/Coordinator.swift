@@ -37,7 +37,7 @@ public actor Coordinator {
     }
 
     public func tick() async throws {
-        let tasks = try await store.tasks()
+        let tasks = try await store.tasks(includeArchived: true)
         let statuses = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0.status) })
         for id in Array(active.keys) {
             guard let run = active[id], !run.stopping else { continue }
@@ -49,8 +49,9 @@ public actor Coordinator {
                 Task { await self.deliver(id, generation: run.generation) }
             }
         }
-        for task in tasks where task.status == .queued && active[task.id] == nil && active.count < concurrency {
+        for task in tasks where task.archivedAt == nil && task.status == .queued && active[task.id] == nil && active.count < concurrency {
             guard let session = try await store.agentSession(taskID: task.id) else { continue }
+            guard try await store.claimWorker(taskID: task.id) else { continue }
             let run = Run(kind: session.kind)
             active[task.id] = run
             run.job = Task { await self.launch(task.id, generation: run.generation) }
@@ -69,8 +70,7 @@ public actor Coordinator {
     private func launch(_ id: String, generation: String) async {
         guard let run = matching(id, generation) else { return }
         do {
-            guard try await store.task(id).status == .queued else { await release(id, generation); return }
-            try await store.transition(id, to: .running)
+            guard try await store.task(id).status == .running else { await release(id, generation); return }
             guard let session = try await store.agentSession(taskID: id) else { throw ManagerError.notFound("No agent session") }
             if session.kind == .mock {
                 run.starting = false
@@ -260,11 +260,13 @@ public actor Coordinator {
 
     private func release(_ id: String, _ generation: String) async {
         guard let run = matching(id, generation) else { return }
-        active.removeValue(forKey: id)
+        run.stopping = true
         run.listener?.cancel()
         // Mock jobs can be cancelled safely; a live launch handles its own post-await generation checks.
         if run.kind == .mock { run.job?.cancel() }
         await run.connection?.stop()
+        try? await store.releaseWorker(taskID: id)
+        if matching(id, generation) != nil { active.removeValue(forKey: id) }
     }
 
     private func matching(_ id: String, _ generation: String) -> Run? {

@@ -50,7 +50,7 @@ struct TaskManagerCLI {
             }
             return
         }
-        let known = ["init", "add", "list", "show", "status", "resume", "message", "ask", "answer", "questions", "journal", "ingest", "route", "propose-comment", "proposals", "decide", "github-import", "github-prs", "tui", "serve", "coordinator-stop", "agent-add", "transcript"]
+        let known = ["init", "add", "list", "show", "status", "resume", "message", "ask", "answer", "questions", "journal", "ingest", "route", "propose-comment", "proposals", "decide", "github-import", "github-prs", "tui", "serve", "coordinator-stop", "agent-add", "transcript", "archive", "restore", "terminal", "release-terminal"]
         guard known.contains(command) else { throw ManagerError.invalid("Unknown command: \(command). Run task-manager help.") }
         try FileManager.default.createDirectory(atPath: statePath, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         statePath = URL(fileURLWithPath: statePath).standardizedFileURL.resolvingSymlinksInPath().path
@@ -76,6 +76,20 @@ struct TaskManagerCLI {
             try count(3)
             guard let kind = WorkerKind(rawValue: args[0]) else { throw ManagerError.invalid("Worker kind must be mock or codex") }
             try output(await store.createAgentTask(goal: args[2], repository: args[1], kind: kind))
+        case "archive": try count(1); try await store.archive(args[0])
+        case "restore": try count(1); try await store.restore(args[0])
+        case "release-terminal": try count(1); try await store.releaseTerminal(taskID: args[0])
+        case "terminal":
+            try count(1)
+            guard isatty(STDIN_FILENO) != 0 else { throw ManagerError.invalid("terminal requires an interactive TTY") }
+            let handoff = try await ManualTerminal.prepare(store: store, taskID: args[0])
+            do {
+                _ = try await ManualTerminal.runShell(session: handoff)
+                try await store.releaseTerminal(taskID: args[0])
+            } catch {
+                try? await store.releaseTerminal(taskID: args[0])
+                throw error
+            }
         case "transcript":
             try count(1)
             try output(await store.outputs(taskID: args[0]))
@@ -85,7 +99,9 @@ struct TaskManagerCLI {
         case "add":
             guard args.count == 1 || args.count == 2 else { throw ManagerError.invalid("add GOAL [SOURCE_KEY]") }
             try output(await store.createTask(goal: args[0], sourceKey: args.count == 2 ? args[1] : nil))
-        case "list": try count(0); try output(await store.tasks())
+        case "list":
+            guard args.isEmpty || args == ["--all"] else { throw ManagerError.invalid("list [--all]") }
+            try output(await store.tasks(includeArchived: args == ["--all"]))
         case "show":
             try count(1)
             try output(await store.task(args[0]))
@@ -148,7 +164,11 @@ struct TaskManagerCLI {
       init                                  Initialize durable local state
       codex-probe [EXECUTABLE]               Check app-server handshake; no agent turn
       add GOAL [SOURCE_KEY]                 Create a queued task
-      list                                  List tasks as JSON
+      list [--all]                          List visible tasks, or include archived history
+      archive TASK_ID                       Stop work and remove task from list
+      restore TASK_ID                       Restore task to list without starting it
+      terminal TASK_ID                      Open interactive shell in child worktree
+      release-terminal TASK_ID              Clear manual ownership after a crashed terminal
       show TASK_ID                          Show task and messages
       status TASK_ID STATUS                 Change local task status
       resume TASK_ID                        Resume paused task; preserve pending question
@@ -166,7 +186,8 @@ struct TaskManagerCLI {
       decide PROPOSAL_ID approve|reject     Record a decision; never publishes
 
     TUI tasks use real Codex workers by default; Tab selects mock mode.
-    q detaches the TUI while workers continue. No external writes are authorized.
+    q detaches the TUI while workers continue. Workers do not publish changes.
+    A task terminal allows you to run git commit/push manually.
     State defaults to ~/Library/Application Support/AutonomousTaskManager.
     Override with --state-dir or TASK_MANAGER_STATE_DIR.
     """

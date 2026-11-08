@@ -5,6 +5,8 @@ int tm_lock_held(const char *path);
 void tm_lock_release(int fd);
 int tm_terminal_open(void);
 void tm_terminal_close(void);
+void tm_terminal_reclaim_foreground(void);
+int tm_terminal_give_foreground(int process_group);
 void tm_terminal_clear(void);
 void tm_terminal_refresh(void);
 int tm_terminal_rows(void);
