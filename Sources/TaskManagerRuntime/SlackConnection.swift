@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 import Security
 import TaskManagerCore
@@ -13,63 +12,47 @@ public struct SlackConnectionInfo: Codable, Sendable {
 public enum SlackConnection {
     private static let service = "com.task-manager.slack.user-token"
 
-    /// The credential stays in this process: never in command arguments, logs, or application state.
-    @MainActor public static func promptToken() throws -> String {
-        let app = NSApplication.shared
-        app.setActivationPolicy(.regular)
-        // A command-line executable has no application menu. Install Edit actions so
-        // standard shortcuts (especially Cmd-V) reach the secure field's editor.
-        let menu = NSMenu()
-        let applicationItem = NSMenuItem()
-        let applicationMenu = NSMenu(title: "Task Manager")
-        applicationMenu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        applicationItem.submenu = applicationMenu
-        menu.addItem(applicationItem)
-        let editItem = NSMenuItem()
-        let edit = NSMenu(title: "Edit")
-        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
-        editItem.submenu = edit
-        menu.addItem(editItem)
-        app.mainMenu = menu
-        app.finishLaunching()
-        let alert = NSAlert()
-        alert.messageText = "Connect Slack to Task Manager"
-        alert.informativeText = "Paste your User OAuth Token (xoxp-). It will be checked with Slack and saved in macOS Keychain. Message polling is not enabled yet."
-        alert.addButton(withTitle: "Connect")
-        alert.addButton(withTitle: "Cancel")
-        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 420, height: 26))
-        field.isEditable = true
-        field.isSelectable = true
-        field.placeholderString = "xoxp-…"
-        alert.accessoryView = field
-        alert.window.initialFirstResponder = field
-        // Focus after the modal event loop has opened the window, rather than
-        // relying on activation of a previously background command-line process.
-        DispatchQueue.main.async {
-            app.activate(ignoringOtherApps: true)
-            alert.window.makeKeyAndOrderFront(nil)
-            alert.window.makeFirstResponder(field)
-        }
-        guard alert.runModal() == .alertFirstButtonReturn else { throw ManagerError.invalid("Slack connection cancelled") }
-        let token = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        field.stringValue = ""
+    /// Standard macOS secure input runs in its own UI process. The token is returned
+    /// through a private pipe, never through command arguments, files, or logs.
+    public static func promptToken() async throws -> String {
+        let script = """
+        set answer to display dialog "Paste your Slack User OAuth Token (xoxp-). It will be verified and stored in macOS Keychain." default answer "" with hidden answer buttons {"Cancel", "Connect"} default button "Connect" with title "Connect Slack to Task Manager"
+        return text returned of answer
+        """
+        let token = try await Task.detached {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = ["-e", script]
+            process.standardInput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { throw ManagerError.invalid("Slack connection cancelled or secure prompt unavailable") }
+            return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        }.value
         try validateToken(token)
         return token
     }
 
-    @MainActor public static func showResult(title: String, message: String) {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.addButton(withTitle: "OK")
-        DispatchQueue.main.async {
-            NSApplication.shared.activate(ignoringOtherApps: true)
-            alert.window.makeKeyAndOrderFront(nil)
-        }
-        alert.runModal()
+    public static func showResult(title: String, message: String) async {
+        // Pass non-secret display text as arguments so workspace names cannot become script code.
+        let script = """
+        on run argv
+            display dialog (item 1 of argv) buttons {"OK"} default button "OK" with title (item 2 of argv)
+        end run
+        """
+        await Task.detached {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = ["-e", script, message, title]
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            if (try? process.run()) != nil { process.waitUntilExit() }
+        }.value
     }
 
     public static func validateToken(_ token: String) throws {
