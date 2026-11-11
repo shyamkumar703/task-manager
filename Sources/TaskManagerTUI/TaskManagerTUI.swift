@@ -7,10 +7,10 @@ import TaskManagerRuntime
 
 @MainActor
 public final class TaskManagerTUI {
-    private enum Page { case home, activity, connections, repositories }
+    private enum Page { case home, activity, connections, repositories, usage }
     private enum Composer {
         case new, message(String), answer(String), source, clarify(Int64, Int, String)
-        case repositoryPath(String, String), interval(String, Bool), filter
+        case repositoryPath(String, String), interval(String, Bool), workspaceInterval(String), filter
         var title: String {
             switch self {
             case .new: "New task goal"
@@ -19,7 +19,8 @@ public final class TaskManagerTUI {
             case .source: "Simulate incoming source message"
             case .clarify: "Answer source clarification"
             case .repositoryPath(let slug, _): "Local checkout for " + slug
-            case .interval: "Polling interval in seconds (10–86400)"
+            case .interval: "Polling interval in seconds (1–86400)"
+            case .workspaceInterval: "Slack polling interval for ALL channels, in seconds (1–86400)"
             case .filter: "Filter repositories"
             }
         }
@@ -33,16 +34,16 @@ public final class TaskManagerTUI {
             case .github(let s): "github:" + s.id
             }
         }
-        var title: String {
+        func title(names: SlackNameDirectory) -> String {
             switch self {
             case .workspace(let s): "Slack / " + s.name
-            case .slack(let s): "  " + s.channelName
+            case .slack(let s): "  " + names.channel(s.channelID, workspace: s.workspaceID, fallback: s.channelName)
             case .github(let s): "GitHub / " + s.repository
             }
         }
         var subtitle: String {
             switch self {
-            case .workspace(let s): s.lastError ?? "Automatic conversation discovery"
+            case .workspace(let s): s.lastError ?? "Default polling: every \(s.intervalSeconds)s"
             case .slack(let s): !s.enabled ? "Paused" : s.lastError ?? "Every \(s.intervalSeconds)s"
             case .github(let s): !s.enabled ? "Paused" : s.lastError ?? "Every \(s.intervalSeconds)s"
             }
@@ -90,6 +91,10 @@ public final class TaskManagerTUI {
     private var cleanupPlan: WorktreeCleanup.Plan?
     private var taskInfoMode = false
     private var taskInfo: TaskInfo?
+    private var usageReport = UsageReport()
+    private var taskUsage = UsageReport()
+    private var usageIndex = 0
+    private var slackNames = SlackNameDirectory()
     private var replySource: IncomingSource?
     private var kind: WorkerKind = .codex
     private var composer: Composer?
@@ -147,10 +152,12 @@ public final class TaskManagerTUI {
         tasks = DashboardModel.work(try await store.tasks())
         questions = try await store.questions()
         actions = try await store.userActions()
-        sources = try await store.sources()
+        usageReport = try await store.usage()
+        slackNames = try await store.slackNames()
+        sources = try await store.incomingActivity()
         let urgent = try await store.sourcesNeedingAttention()
         // A selected old clarification must remain inspectable even beyond the recent-activity window.
-        if let id = selectedSourceID, !sources.contains(where: { $0.id == id }), let source = try? await store.source(id) { sources.append(source) }
+        if let id = selectedSourceID, !sources.contains(where: { $0.id == id }), try await store.isVisibleInActivity(id), let source = try? await store.source(id) { sources.append(source) }
         let slack = try await store.slackSources(), workspaces = try await store.slackWorkspaces(), github = try await store.gitHubSources()
         connections = workspaces.map(Connection.workspace) + slack.sorted { ($0.workspaceName, $0.channelName) < ($1.workspaceName, $1.channelName) }.map(Connection.slack) + github.map(Connection.github)
         attention = DashboardModel.attention(tasks: tasks, questions: questions, sources: urgent, actions: actions, proposals: try await store.proposals(), slack: slack, workspaces: workspaces, github: github)
@@ -176,6 +183,7 @@ public final class TaskManagerTUI {
         else if page == .activity { id = selectedSource?.taskID }
         else { id = nil }
         if let id {
+            taskUsage = try await store.usage(taskID: id)
             session = try await store.agentSession(taskID: id)
             outputs = try await store.outputs(taskID: id)
             messages = try await store.messages(taskID: id)
@@ -183,7 +191,7 @@ public final class TaskManagerTUI {
                 if taskInfo?.task.id != id { navigation.viewport = DetailViewport() }
                 taskInfo = try await store.taskInfo(id)
             } else { taskInfo = nil }
-        } else { session = nil; outputs = []; messages = []; taskInfo = nil }
+        } else { session = nil; outputs = []; messages = []; taskInfo = nil; taskUsage = UsageReport() }
     }
     private func show(_ page: Page) {
         self.page = page; help = false
@@ -238,6 +246,17 @@ public final class TaskManagerTUI {
         case 49, 118: show(.home); try await loadTranscript(); return // v remains a compatibility alias, never required.
         case 50: show(.activity); try await loadTranscript(); return
         case 51: show(.connections); return
+        case 52: show(.usage); navigation.focus = .detail; return
+        case 67 where page == .activity:
+            let count = try await store.clearIncomingActivity()
+            selectedSourceID = nil; navigation.viewport = DetailViewport()
+            try await reload()
+            notice = "Cleared \(count) history entries. Pending reviews/questions/failures remain. U restores history."
+            return
+        case 85 where page == .activity:
+            let count = try await store.restoreIncomingActivity()
+            try await reload(); notice = "Restored \(count) activity history entries"
+            return
         case 63: savedNavigation = navigation; help = true; navigation.focus = .detail; navigation.viewport = DetailViewport(); return
         case 105 where page == .home:
             if navigation.detailSource == .attention {
@@ -272,6 +291,7 @@ public final class TaskManagerTUI {
         case .activity: try await actOnSource(key)
         case .connections: try await actOnConnection(key)
         case .repositories: try await actOnRepository(key)
+        case .usage: break
         }
     }
     private func edit(_ key: Int32, composer: Composer) async throws {
@@ -298,9 +318,13 @@ public final class TaskManagerTUI {
                 _ = try await store.addGitHubSource(repository: slug, localRepository: text, author: login)
                 show(.connections); notice = "GitHub repository enabled; automatic polling starts at 60s"
             case .interval(let id, let slack):
-                guard let seconds = Int(text) else { throw ManagerError.invalid("Interval must be seconds") }
+                guard let seconds = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) else { throw ManagerError.invalid("Interval must be seconds") }
                 if slack { try await store.setSlackSourceInterval(id, seconds: seconds) } else { try await store.setGitHubSourceInterval(id, seconds: seconds) }
-                notice = "Polling interval updated"
+                notice = "Polling interval updated to \(seconds)s"
+            case .workspaceInterval(let id):
+                guard let seconds = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) else { throw ManagerError.invalid("Interval must be seconds") }
+                try await store.setSlackWorkspaceInterval(id, seconds: seconds)
+                notice = "Slack workspace polling updated to \(seconds)s for current and future channels"
             case .filter: repositoryFilter = text; repositoryIndex = 0
             }
             self.composer = nil; input = Data()
@@ -333,7 +357,7 @@ public final class TaskManagerTUI {
         case .reply(let action):
             if enter { navigation.focus = .detail }
             if key == 99 { try await ReplyClipboard.copy(action.body); notice = "Reply copied. Review and send it manually in the source thread." }
-            if key == 101 { selectedSourceID = action.sourceEventID; show(.activity); try await reload() }
+            if key == 101 { try await store.revealIncomingActivity(action.sourceEventID); selectedSourceID = action.sourceEventID; show(.activity); try await reload() }
             if key == 100 || key == 120 { try await store.resolveUserAction(action.id, dismiss: key == 120); notice = key == 100 ? "Marked replied; nothing was sent by the manager" : "Reply dismissed"; try await reload() }
         case .approval(let proposal):
             if enter { navigation.focus = .detail }
@@ -387,6 +411,10 @@ public final class TaskManagerTUI {
         case 105: _ = try await store.investigateSource(source.id); notice = "Independent exploration queued; its reply will appear in Needs you"; try await reload()
         case 117: try await store.unignoreSource(source.id); notice = "Source unignored; queued for review"; try await reload()
         case 120: try await store.ignoreSource(source.id); notice = "Source ignored"; try await reload()
+        case 100:
+            try await store.hideIncomingActivity(source.id)
+            selectedSourceID = nil; navigation.viewport = DetailViewport()
+            try await reload(); notice = "Message hidden from activity. U restores history."
         default: break
         }
     }
@@ -394,7 +422,9 @@ public final class TaskManagerTUI {
         guard let connection = selectedConnection else { return }
         if [Int32(10), 13, 343].contains(key) { navigation.focus = .detail; return }
         switch connection {
-        case .workspace(let s): if key == 114 { try await store.retrySlackDiscovery(s.id); notice = "Discovery scheduled now" }
+        case .workspace(let s):
+            if key == 114 { try await store.retrySlackDiscovery(s.id); notice = "Discovery scheduled now" }
+            if key == 105 { compose(.workspaceInterval(s.id), text: String(s.intervalSeconds)) }
         case .slack(let s):
             if key == 112 || key == 114 { try await store.setSlackSourceEnabled(s.id, enabled: key == 114 || !s.enabled); notice = key == 114 ? "Poll scheduled now" : "Conversation polling updated" }
             if key == 105 { compose(.interval(s.id, true), text: String(s.intervalSeconds)) }
@@ -475,6 +505,7 @@ public final class TaskManagerTUI {
             if !connections.isEmpty { selectedConnectionID = connections[index(connections.firstIndex { $0.id == selectedConnectionID } ?? 0, connections.count)].id }
             navigation.selected()
         case .repositories: repositoryIndex = index(repositoryIndex, repositoryIndices.count); navigation.selected()
+        case .usage: usageIndex = index(usageIndex, UsagePresentation.roles.count); navigation.selected()
         }
     }
 
@@ -505,6 +536,11 @@ public final class TaskManagerTUI {
         }
         if help { return helpDetail(width: width) }
         switch page {
+        case .usage:
+            let (role, title) = UsagePresentation.roles[usageIndex]
+            let report = usageReport.forRole(role)
+            let lines = UsagePresentation.sections(report).flatMap { section($0.title, $0.text, width: width, style: $0.style) }
+            return Detail(title: title + " · usage & cost", subtitle: "All recorded activity in this state directory", commands: "h: categories   l: details   j/k · Ctrl-U/D: scroll   1: home", lines: lines)
         case .home:
             if navigation.detailSource == .attention {
                 if let item = selectedAttention { return attentionDetail(item, width: width) }
@@ -514,7 +550,7 @@ public final class TaskManagerTUI {
             return Detail(title: "Your work starts here", subtitle: "Connected sources can create tasks automatically", commands: "n: new task   3: connection health   ?: help", lines: section("NO TASKS YET", "Create a task with n, or let an incoming source identify work. Questions and reply drafts are surfaced in Needs you without switching views.", width: width))
         case .activity:
             if let source = selectedSource { return sourceDetail(source, width: width) }
-            return Detail(title: "Incoming activity", subtitle: "Source messages and their recorded decisions", commands: "s: simulate incoming message   1: home", lines: section("NO MESSAGES YET", "Connected sources feed this history automatically. Items that need a response also appear on Home in Needs you.", width: width))
+            return Detail(title: "Incoming activity", subtitle: "New source messages appear here automatically", commands: "C: clear history   U: restore history   s: simulate incoming message   1: home", lines: section("NO VISIBLE HISTORY", "You're caught up. U restores cleared history. Clearing hides processed messages; task history and Needs you are retained. Pending reviews, questions, and failures stay visible.", width: width))
         case .connections:
             if let c = selectedConnection { return connectionDetail(c, width: width) }
             return Detail(title: "Connections", subtitle: "Source monitoring is owned by the background coordinator", commands: "n: add GitHub repository   1: home", lines: section("GITHUB", "n discovers repositories using your existing gh login and the current checkout's origin.", width: width) + section("SLACK", "Connected Slack workspaces are monitored automatically. To connect one, run task-manager --state-dir PATH slack-connect in a terminal. The token is stored in macOS Keychain.", width: width))
@@ -532,7 +568,7 @@ public final class TaskManagerTUI {
         let team = components.queryItems?.first { $0.name == "team" }?.value
         let channel = components.queryItems?.first { $0.name == "id" }?.value
         for connection in connections {
-            if case .slack(let s) = connection, s.workspaceID == team, s.channelID == channel { return "Slack / \(s.workspaceName) / #\(s.channelName)" }
+            if case .slack(let s) = connection, s.workspaceID == team, s.channelID == channel { return "Slack / \(s.workspaceName) / " + slackNames.channel(s.channelID, workspace: s.workspaceID, fallback: s.channelName) }
         }
         return url
     }
@@ -546,7 +582,7 @@ public final class TaskManagerTUI {
         case .workerQuestion(let q, let task):
             return Detail(title: "Your child needs an answer", subtitle: single(task.goal), commands: "Enter / a: answer   o: open child", lines: section("QUESTION", q.prompt, width: width, style: 4) + section("TASK", task.goal, width: width) + section("WHAT HAPPENS NEXT", "Your answer is saved durably and delivered to this child. Other children continue independently.", width: width, style: 3))
         case .reply(let a):
-            let original = replySource.map { section("ORIGINAL REQUEST", $0.body, width: width, style: 3) } ?? []
+            let original = replySource.map { section("ORIGINAL REQUEST", slackNames.body(of: $0), width: width, style: 3) } ?? []
             return Detail(title: "Reply ready for review", subtitle: destination(a.target), commands: "c: copy reply   d: mark replied   x: dismiss   e: source   o: child", lines: section("SUGGESTED REPLY", a.body, width: width) + original + section("WHERE TO RESPOND", destination(a.target) + "\n" + a.target, width: width, style: 3) + section("NEXT STEP", "Copy the reply with c, review/edit it in the source thread, and send it manually. Then use d to mark this item replied. Dismissing or marking replied does not send a message.", width: width, style: 4) + section("EVIDENCE / INSPECTED SNAPSHOT", a.context, width: width))
         case .approval(let p):
             return Detail(title: "Review proposed action", subtitle: p.kind, commands: "a: approve decision   x: reject   c: copy text   o: child", lines: section("EXACT PROPOSED TEXT", p.body, width: width) + section("TARGET", p.target, width: width) + section("EXPECTED HEAD", p.expectedHead, width: width, style: 3) + section("APPROVAL BEHAVIOR", "Approval records your decision only. Automatic publication for this proposal is not implemented; nothing will be posted by these controls.", width: width, style: 4))
@@ -566,16 +602,17 @@ public final class TaskManagerTUI {
     private func taskDetail(_ task: ManagedTask, width: Int) -> Detail {
         let role = session?.purpose.rawValue ?? "implementation"
         if taskInfoMode, navigation.detailSource == .work, let info = taskInfo, info.task.id == task.id {
-            let lines = TaskInfoPresentation.sections(info).flatMap { section($0.title, $0.text, width: width, style: $0.style) }
+            let lines = (UsagePresentation.sections(taskUsage) + TaskInfoPresentation.sections(info, slackNames: slackNames)).flatMap { section($0.title, $0.text, width: width, style: $0.style) }
             return Detail(title: "Task info · " + single(task.goal), subtitle: "\(taskStatus(task.status)) · \(info.sources.count) connection messages · \(info.journal.count) recorded events", commands: "i / Esc: progress   C: cleanup   o: tmux workspace   m: message   j/k · Ctrl-U/D · gg/G: scroll", lines: lines)
         }
         var lines: [Line] = []
         if ![TaskStatus.cancelled, .completed, .failed].contains(task.status), let q = questions.first(where: { $0.taskID == task.id && $0.answer == nil }) { lines += section("ANSWER NEEDED · a responds", q.prompt, width: width, style: 4) }
         if let action = actions.first(where: { $0.taskID == task.id && $0.status == "open" }) { lines += section("REPLY READY · Home → Needs you", action.body, width: width, style: 4) }
         lines += section("GOAL", task.goal, width: width)
+        lines += section("USAGE & COST", UsagePresentation.compact(taskUsage) + "\nAPI-equivalent estimate, not a bill. 4 opens the full usage breakdown.", width: width, style: 3)
         if let path = session?.workspace { lines += section("WORKSPACE", path, width: width, style: 3) }
         for output in outputs {
-            let text = output.kind == "assistant" ? TerminalText.assistantText(output.text) : output.text
+            let text = output.kind == "assistant" ? TerminalText.assistantText(output.text) : output.kind == "user" ? slackNames.envelope(output.text) : output.text
             var label = output.kind.uppercased()
             if output.kind == "user", let message = messages.first(where: { output.itemID == "message-\($0.id)" }) { label += message.delivered ? " · ACCEPTED" : " · QUEUED" }
             let style: Int32 = output.kind == "error" ? 6 : output.kind == "tool" || output.kind == "system" ? 3 : 0
@@ -597,13 +634,14 @@ public final class TaskManagerTUI {
         var lines: [Line] = []
         if let q = source.question { lines += section("QUESTION · Enter answers", q, width: width, style: 4) }
         if let error = source.lastError { lines += section("REVIEW ERROR", error, width: width, style: 6) }
-        lines += section("INCOMING MESSAGE", source.body, width: width)
+        lines += section("INCOMING MESSAGE", slackNames.body(of: source), width: width)
         if let reason = source.reason { lines += section("DECISION", reason, width: width) }
         if let c = source.githubContext {
             lines += section("PR CONTEXT", "\(c.repository) #\(c.pullRequest)\nBranch: \(c.headBranch)\nPublished head: \(c.headSHA)\nCheckout: \(c.checkout ?? "No matching local checkout")\nOwning task: \(c.owningTaskID ?? "Not yet associated")", width: width, style: 3)
         }
         if let c = source.slackContext {
-            let context = "\(c.workspaceName) / #\(c.channelName)\nTopic: \(c.topic ?? "—")\nPurpose: \(c.purpose ?? "—")\n\(c.precedingMessages.count) preceding messages · \(c.threadMessages.count) thread messages · \(c.projectHistory.count) prior project decisions"
+            let channel = slackNames.channel(c.channelID, workspace: slackNames.workspace(of: source) ?? "", fallback: c.channelName)
+            let context = "\(c.workspaceName) / \(channel)\nTopic: \(c.topic ?? "—")\nPurpose: \(c.purpose ?? "—")\n\(c.precedingMessages.count) preceding messages · \(c.threadMessages.count) thread messages · \(c.projectHistory.count) prior project decisions"
             lines += section("CONTEXT USED", context, width: width, style: 3)
         }
         if let clarification = source.clarification { lines += section("YOUR CLARIFICATION", clarification, width: width) }
@@ -620,17 +658,24 @@ public final class TaskManagerTUI {
         case .routed, .created: commands = "Enter: child   i: independent investigation"
         default: commands = "x: ignore   l: inspect message"
         }
-        return Detail(title: "\(source.integration.capitalized) message #\(source.id)", subtitle: "\(sourceStatus(source.disposition)) · \(source.slackContext.map { "Slack / #" + $0.channelName } ?? (destination(source.url) == source.url ? source.integration.capitalized : destination(source.url)))", commands: commands, lines: lines)
+        let history = ([SourceDisposition.routed, .created, .ignored].contains(source.disposition) ? "d: hide   " : "") + "C: clear history   U: restore history"
+        return Detail(title: "\(source.integration.capitalized) message #\(source.id)", subtitle: "\(sourceStatus(source.disposition)) · \(sourceSummary(source))", commands: commands + "   " + history, lines: lines)
+    }
+    private func sourceSummary(_ source: IncomingSource) -> String {
+        if source.integration == "slack" {
+            return "Slack " + [slackNames.channel(of: source), slackNames.author(of: source)].compactMap { $0 }.joined(separator: " · ")
+        }
+        return destination(source.url) == source.url ? source.integration.capitalized : destination(source.url)
     }
     private func connectionDetail(_ c: Connection, width: Int) -> Detail {
         var lines: [Line] = []
         let commands: String
         switch c {
         case .workspace(let s):
-            commands = "r: retry discovery   n: add GitHub repository"
+            commands = "i: polling interval (all channels)   r: retry discovery   n: add GitHub repository"
             if let error = s.lastError { lines += section("DISCOVERY ERROR", error, width: width, style: 6) }
-            lines += section("MONITORING", "Accessible Slack channels and DMs are discovered and monitored automatically. No per-channel setup is required.", width: width)
-            lines += section("SCHEDULE", "Last discovery: \(time(s.lastSuccess))\nNext discovery: \(time(s.nextDiscovery))\nConsecutive failures: \(s.failures)", width: width, style: 3)
+            lines += section("MONITORING", "Accessible Slack channels and DMs are discovered and monitored automatically. Press i to update all channels and the default for future channels. Select a channel below to override its interval individually.", width: width)
+            lines += section("SCHEDULE", "Default message polling: every \(s.intervalSeconds)s\nConversation discovery: every 60s\nLast discovery: \(time(s.lastSuccess))\nNext discovery: \(time(s.nextDiscovery))\nConsecutive failures: \(s.failures)", width: width, style: 3)
         case .slack(let s):
             commands = "p: pause/resume polling   i: interval   r: retry now"
             if let error = s.lastError { lines += section("POLLING ERROR", error, width: width, style: 6) }
@@ -643,11 +688,13 @@ public final class TaskManagerTUI {
             lines += section("SCHEDULE", "\(s.enabled ? "Enabled" : "Paused") · every \(s.intervalSeconds)s\nLast success: \(time(s.lastSuccess))\nNext poll: \(s.enabled ? time(s.nextPoll) : "paused")\nConsecutive failures: \(s.failures)", width: width, style: 3)
         }
         if c.hasError { lines += section("WHAT TO DO", "Check the reported scope/authentication or repository error. Retry with r after fixing it. Network errors also retry automatically with backoff. Slack credentials can be updated using slack-connect; GitHub uses your existing gh login.", width: width, style: 4) }
-        return Detail(title: c.title.trimmingCharacters(in: .whitespaces), subtitle: c.subtitle, commands: commands, lines: lines)
+        return Detail(title: c.title(names: slackNames).trimmingCharacters(in: .whitespaces), subtitle: c.subtitle, commands: commands, lines: lines)
     }
     private func helpDetail(width: Int) -> Detail {
         let text = """
         1 Home: Needs you + work + detail
+        4 Usage: tokens and API-equivalent cost by role and model
+        Activity: C clears processed history, d hides one message, U restores hidden history
         2 Activity: incoming messages and decisions
         3 Connections: monitoring health and settings
 
@@ -704,7 +751,9 @@ public final class TaskManagerTUI {
         let active = tasks.filter { $0.status == .running || $0.status == .queued }.count
         put(1, 1, attention.isEmpty ? "All caught up  ·  \(active) active children" : "\(attention.count) \(attention.count == 1 ? "ITEM NEEDS" : "ITEMS NEED") YOU  ·  \(answers) \(answers == 1 ? "question" : "questions")  ·  \(replies) \(replies == 1 ? "reply" : "replies") ready  ·  \(active) active", columns - 2, attention.isEmpty ? 5 : 4)
         let home = page == .home ? "[1 Home]" : "1 Home", activity = page == .activity ? "[2 Activity]" : "2 Activity", settings = page == .connections || page == .repositories ? "[3 Connections]" : "3 Connections"
-        put(2, 1, "\(home)     \(activity)     \(settings)     ? Help", columns - 2, 1)
+        let usage = page == .usage ? "[4 Usage]" : "4 Usage"
+        put(2, 1, "\(home)     \(activity)     \(settings)     \(usage)     ? Help", columns - 2, 1)
+        put(3, 1, UsagePresentation.compact(usageReport), columns - 2, 3)
         for row in 4...bottom { put(row, leftWidth + 1, "│", 1, navigation.focus == .detail ? 1 : 7) }
         if page == .home { drawHomeLists(width: leftWidth, bottom: bottom) }
         else { drawSecondaryList(width: leftWidth, bottom: bottom) }
@@ -755,13 +804,18 @@ public final class TaskManagerTUI {
         let selected: String?
         let title: String
         switch page {
+        case .usage:
+            title = "USAGE BY ROLE"; selected = String(usageIndex)
+            entries = UsagePresentation.roles.enumerated().map { index, role in
+                (String(index), role.1, UsagePresentation.compact(usageReport.forRole(role.0)), false)
+            }
         case .activity:
-            title = "INCOMING ACTIVITY"
+            title = "INCOMING ACTIVITY · C clear · U restore"
             selected = selectedSourceID.map(String.init)
-            entries = sources.map { (String($0.id), "#\($0.id) " + single($0.body), $0.integration.capitalized + " · " + sourceStatus($0.disposition), $0.disposition == .failed || $0.disposition == .waitingForUser) }
+            entries = sources.map { (String($0.id), "#\($0.id) " + single(slackNames.preview(of: $0)), sourceSummary($0) + " · " + sourceStatus($0.disposition), $0.disposition == .failed || $0.disposition == .waitingForUser) }
         case .connections:
             title = "SOURCE HEALTH"; selected = selectedConnectionID
-            entries = connections.map { ($0.id, $0.title, $0.subtitle, $0.hasError) }
+            entries = connections.map { ($0.id, $0.title(names: slackNames), $0.subtitle, $0.hasError) }
         case .repositories:
             title = "ADD GITHUB REPOSITORY"; selected = String(repositoryIndex)
             entries = repositoryIndices.enumerated().map { offset, index in
@@ -790,7 +844,7 @@ public final class TaskManagerTUI {
         } else {
             put(rows - 3, 1, String(repeating: "─", count: columns - 2), columns - 2, 7)
             put(rows - 2, 1, notice, columns - 2, notice.hasPrefix("Error:") ? 6 : 3)
-            put(rows - 1, 1, "j/k move · h/l panes · Ctrl-W h/j/k/l · Ctrl-U/D scroll · gg/G · 1 Home  2 Activity  3 Connections · ? help · q detach", columns - 2, 3)
+            put(rows - 1, 1, "j/k move · h/l panes · Ctrl-W h/j/k/l · Ctrl-U/D scroll · gg/G · 1 Home  2 Activity  3 Connections  4 Usage · ? help · q detach", columns - 2, 3)
         }
     }
     private func put(_ row: Int, _ column: Int, _ text: String, _ width: Int, _ style: Int32 = 0) {

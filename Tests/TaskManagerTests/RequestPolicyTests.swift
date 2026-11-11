@@ -19,6 +19,18 @@ private struct StatusEvidenceAPI: GitHubHTTPTransport {
             json = #"[{"id":1,"body":"","state":"APPROVED","html_url":"https://github.com/o/r/pull/5#review-1","commit_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]"#
         } else if path.hasSuffix("/check-runs") {
             json = #"{"total_count":1,"check_runs":[{"name":"command-tests","status":"completed","conclusion":"success","html_url":"https://github.com/o/r/actions/runs/1"}]}"#
+        } else if path.hasSuffix("/pulls/5/files") {
+            json = #"[{"filename":"Sources/TodoList/main.swift","status":"modified","patch":"+fail(Please provide a todo ID)"},{"filename":"Tests/cli_test.py","status":"added","patch":"+assert friendly message"}]"#
+        } else if path.contains("/contents/") {
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
+            guard query?.first(where: { $0.name == "ref" })?.value == String(repeating: "a", count: 40) else {
+                throw ManagerError.invalid("Source read must use the immutable PR head")
+            }
+            let text = path.hasSuffix("main.swift") ? "fail(\"Please provide a todo ID as a whole number greater than 0.\")" : "assert 'Please provide a todo ID' in stderr"
+            let data = try JSONSerialization.data(withJSONObject: ["encoding": "base64", "content": Data(text.utf8).base64EncodedString()])
+            return HTTPResponse(data: data, status: 200)
+        } else if path.hasSuffix("/pulls/5/comments") {
+            json = #"[{"id":1,"body":"Please make invalid-ID errors more user friendly.","path":"Sources/TodoList/main.swift","commit_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","diff_hunk":"-fail(Usage: todo remove <id>)","html_url":"https://github.com/o/r/pull/5#discussion-1"}]"#
         } else if path.hasSuffix("/comments") { json = "[]" }
         else { throw ManagerError.invalid("Unexpected endpoint \(path)") }
         return HTTPResponse(data: Data(json.utf8), status: 200)
@@ -70,7 +82,10 @@ private func policyRepository() async throws -> (String, String) {
     #expect(context.liveEvidence?.contains("Merged: true") == true)
     #expect(context.liveEvidence?.contains("APPROVED") == true)
     #expect(context.liveEvidence?.contains("command-tests: completed, success") == true)
-    try await store.applyTriage(eventID: id, decision: .init(action: .investigate, goal: "Check PR #5 status", reason: "Status question", inspectionScope: "status", pullRequestNumber: 5))
+    #expect(context.liveEvidence?.contains("1: fail(\"Please provide a todo ID") == true)
+    #expect(context.liveEvidence?.contains("1: assert 'Please provide a todo ID' in stderr") == true)
+    // Reproduce the bad classification that previously sent a progress question to main.
+    try await store.applyTriage(eventID: id, decision: .init(action: .investigate, goal: "Determine the current status of deletion PR #5, including outstanding work", reason: "Status question", inspectionScope: "code", pullRequestNumber: 5))
     let taskID = try #require(await store.source(id).taskID)
     for index in 0..<210 { try await store.writeOutput(taskID: taskID, itemID: "old-\(index)", kind: "system", text: "Old transcript entry") }
     let agent = EvidenceAgent()
@@ -120,9 +135,9 @@ func liveWorkerHonorsExplicitPushRequestAgainstLocalBareRemote() async throws {
 func livePRStatusAnswerUsesRemoteEvidenceWithoutLocalHead() async throws {
     let (root, repo) = try await policyRepository(); defer { try? FileManager.default.removeItem(atPath: root) }
     let store = try Store(path: root + "/state.sqlite")
-    let id = try await store.injectSource(body: "What is the status of PR #5? Is it merged, what is its review status, and did command-tests pass?", repository: repo)
+    let id = try await store.injectSource(body: "What is the status of PR #5? Did it address the friendlier invalid-ID error review? Is it merged, and did command-tests pass?", repository: repo)
     _ = try await store.claimTriageEvent()
-    try await store.applyTriage(eventID: id, decision: .init(action: .investigate, goal: "Check current PR #5 merge, review, and CI status using live GitHub evidence", reason: "Status request", inspectionScope: "status"))
+    try await store.applyTriage(eventID: id, decision: .init(action: .investigate, goal: "Check current status of PR #5, verifying whether the invalid-ID review request is addressed, plus merge/review/CI status", reason: "Status request", inspectionScope: "code"))
     let taskID = try #require(await store.source(id).taskID)
     let resolver = GitHubContextResolver(client: try GitHubClient(transport: StatusEvidenceAPI()))
     let coordinator = Coordinator(store: store, stateDirectory: root, githubResolver: resolver)
@@ -138,6 +153,8 @@ func livePRStatusAnswerUsesRemoteEvidenceWithoutLocalHead() async throws {
         #expect(reply.contains("merged"))
         #expect(reply.contains("approved"))
         #expect(reply.contains("command-tests"))
+        #expect(reply.contains("friendlier") || reply.contains("user-friendly") || reply.contains("invalid"))
+        #expect(!reply.contains("haven’t verified") && !reply.contains("haven't verified") && !reply.contains("unverified"))
         #expect(!reply.contains("can’t verify") && !reply.contains("cannot verify") && !reply.contains("can't verify"))
         await coordinator.shutdown()
     } catch { await coordinator.shutdown(); throw error }

@@ -37,7 +37,7 @@ public enum JSONValue: Codable, Sendable, Equatable {
         return value
     }
 
-    var integer: Int64? {
+    public var integer: Int64? {
         guard case .integer(let value) = self else { return nil }
         return value
     }

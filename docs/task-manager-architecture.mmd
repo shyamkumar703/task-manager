@@ -1,0 +1,28 @@
+flowchart TB
+    sources["Slack + GitHub"]
+    user["User · TUI / CLI"]
+    subgraph daemon["Local coordinator daemon · Swift actors"]
+        polls["Polling + discovery\nIndependent jobs, backoff, checkpoints"]
+        ingest["Normalize + deduplicate events\nSource ID + revision"]
+        triage["Codex master triage\nStructured decision proposal"]
+        lookup["Bounded context lookup\nSlack history + GitHub PRs"]
+        apply["Validate + apply decision\nRoute / create / investigate / ignore / ask"]
+        schedule["Worker lifecycle + inbox delivery\nClaim, resume, steer, interrupt"]
+        polls --> ingest --> triage --> apply --> schedule
+        triage -->|Provisional clarification| lookup
+        lookup -->|Evidence · reconsider once| triage
+    end
+    db[("Durable SQLite · WAL\nEvents, tasks, inboxes, questions,\nsessions, outputs, journal")]
+    impl["Implementation worker\nCodex thread + git worktree\nEdit / test / requested push"]
+    explore["Exploration worker\nRead-only inspection\nFresh PR evidence + published-head code"]
+    sources --> polls
+    lookup -.->|Authenticated reads| sources
+    ingest --> db
+    apply --> db
+    schedule <--> db
+    user <--> db
+    schedule --> impl
+    schedule --> explore
+    impl -->|Output / outcome / question| db
+    explore -->|Findings + suggested reply| db
+    user -.->|Manual handoff · same thread| impl

@@ -136,3 +136,16 @@ public struct UserAction: Codable, Sendable, Identifiable {
     public let context: String
     public let status: String
 }
+
+public struct SourceReply: Codable, Sendable {
+    public let sourceEventID: Int64
+    public let text: String
+    public init(sourceEventID: Int64, text: String) { self.sourceEventID = sourceEventID; self.text = text }
+}
+
+public struct SourceReplyRequest: Codable, Sendable {
+    public let sourceEventID: Int64
+    public let url: String
+    public let body: String
+    public init(sourceEventID: Int64, url: String, body: String) { self.sourceEventID = sourceEventID; self.url = url; self.body = body }
+}

@@ -52,7 +52,7 @@ struct TaskManagerCLI {
             return
         }
         let known = ["init", "add", "list", "show", "status", "resume", "message", "ask", "answer", "questions", "journal", "ingest", "route", "propose-comment", "proposals", "decide", "github-import", "github-poll", "github-watch", "github-discover", "github-sources", "github-enable", "github-disable", "github-prs", "tui", "serve", "coordinator-start", "coordinator-stop", "agent-add", "transcript", "archive", "restore", "terminal", "release-terminal", "source-inject", "source-events", "source-answer", "source-retry", "source-ignore", "source-unignore", "source-investigate", "actions", "action-done", "action-dismiss", "slack-connect", "slack-conversations", "slack-watch", "slack-sources", "slack-enable", "slack-disable", "slack-poll"]
-        guard known.contains(command) else { throw ManagerError.invalid("Unknown command: \(command). Run task-manager help.") }
+        guard known.contains(command) || ["usage", "usage-price", "source-continue", "slack-refresh-names"].contains(command) else { throw ManagerError.invalid("Unknown command: \(command). Run task-manager help.") }
         try FileManager.default.createDirectory(atPath: statePath, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         statePath = URL(fileURLWithPath: statePath).standardizedFileURL.resolvingSymlinksInPath().path
         let store = try Store(path: URL(fileURLWithPath: statePath).appendingPathComponent("state.sqlite").path)
@@ -63,9 +63,25 @@ struct TaskManagerCLI {
         case "actions": try count(0); try output(await store.userActions())
         case "action-done", "action-dismiss":
             try count(1); try await store.resolveUserAction(args[0], dismiss: command == "action-dismiss")
+        case "usage":
+            guard args.count <= 1 else { throw ManagerError.invalid("usage [TASK_ID]") }
+            try output(await store.usage(taskID: args.first))
+        case "usage-price":
+            guard args.count == 4 || args.count == 5, let input = Double(args[1]), let cached = Double(args[2]), let output = Double(args[3]) else {
+                throw ManagerError.invalid("usage-price MODEL INPUT_USD_PER_M CACHED_INPUT_USD_PER_M OUTPUT_USD_PER_M [PROVIDER]")
+            }
+            try await store.setUsagePrice(model: args[0], provider: args.count == 5 ? args[4] : "openai", price: .init(input: input, cachedInput: cached, output: output, source: "User-configured API-equivalent rate"))
+            print("Rate saved. Previously unpriced usage can now be estimated; existing rate snapshots are retained.")
         case "slack-conversations":
             try count(0); try output(await SlackDiscovery.discover(stateDirectory: statePath))
         case "slack-sources": try count(0); try output(await store.slackSources())
+        case "slack-refresh-names":
+            try count(0)
+            for connection in try SlackConnection.connections(stateDirectory: statePath) {
+                try await store.ensureSlackWorkspace(id: connection.workspaceID, name: connection.workspaceName, userID: connection.userID)
+            }
+            try await store.retryMissingSlackNames()
+            print("Updated \(try await SlackNameResolver(store: store).refresh()) Slack display names. Cached names are refreshed daily.")
         case "slack-watch":
             guard args.count == 3 || args.count == 4 else { throw ManagerError.invalid("slack-watch WORKSPACE_ID CHANNEL_ID LOCAL_REPO [SECONDS]") }
             let interval = args.count == 4 ? Int(args[3]) : 60
@@ -121,6 +137,11 @@ struct TaskManagerCLI {
             guard args.count == 3 || args.count == 4, let kind = WorkerKind(rawValue: args[0]) else { throw ManagerError.invalid("source-inject mock|codex REPO TEXT [ASSOCIATION_KEY]") }
             print(try await store.injectSource(body: args[2], repository: args[1], workerKind: kind, associationKey: args.count == 4 ? args[3] : nil))
         case "source-events": try count(0); try output(await store.sources())
+        case "source-continue":
+            try count(2)
+            guard let id = Int64(args[0]) else { throw ManagerError.invalid("Source event ID must be an integer") }
+            try await store.continueSource(id, in: args[1])
+            print("Source continued in the implementation task; a suggested reply will be prepared.")
         case "source-answer", "source-retry", "source-ignore", "source-unignore", "source-investigate":
             try count(command == "source-answer" ? 2 : 1)
             guard let id = Int64(args[0]) else { throw ManagerError.invalid("Source event ID must be an integer") }
@@ -241,6 +262,9 @@ struct TaskManagerCLI {
       serve                                 Run coordinator in foreground
       coordinator-start                     Start or update the persistent coordinator
       coordinator-stop                      Pause workers and stop coordinator
+      usage [TASK_ID]                      Recorded tokens and API-equivalent cost estimates
+      usage-price MODEL INPUT CACHED OUTPUT [PROVIDER]
+                                          Set USD rates per million tokens (not subscription billing)
       agent-add mock|codex REPO GOAL         Queue a child task (coordinator must be running)
       transcript TASK_ID                    Show saved worker output
       source-inject mock|codex REPO TEXT [ASSOCIATION_KEY]
@@ -258,6 +282,8 @@ struct TaskManagerCLI {
       slack-disable SOURCE_ID               Disable Slack conversation polling
       slack-poll SOURCE_ID                  Poll a configured Slack conversation once
       source-answer EVENT_ID TEXT           Answer master clarification
+      source-continue EVENT_ID TASK_ID      Continue a finished investigation in existing implementation work
+      slack-refresh-names                  Refresh missing or expired Slack display names
       source-retry EVENT_ID                  Retry failed triage
       source-investigate EVENT_ID           Start independent source-context exploration
       source-unignore EVENT_ID              Reconsider an ignored event through master triage

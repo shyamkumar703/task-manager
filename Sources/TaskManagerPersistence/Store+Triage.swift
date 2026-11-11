@@ -24,6 +24,44 @@ extension Store {
         return try db.query(sourceQuery + filter + " ORDER BY e.id DESC LIMIT ?", (scope.map { [$0] } ?? []) + [String(limit)]).map(decodeSource)
     }
 
+    private var visibleActivity: String {
+        "(e.disposition IN ('pending','triaging','waitingForUser','failed') OR NOT EXISTS (SELECT 1 FROM activity_hidden_events h WHERE h.event_id = e.id))"
+    }
+    public func incomingActivity(limit: Int = 100) throws -> [IncomingSource] {
+        guard (1...1000).contains(limit) else { throw ManagerError.invalid("Activity limit must be 1...1000") }
+        return try db.query(sourceQuery + " WHERE " + visibleActivity + " ORDER BY e.id DESC LIMIT ?", [String(limit)]).map(decodeSource)
+    }
+    public func isVisibleInActivity(_ id: Int64) throws -> Bool {
+        try !db.query("SELECT e.id FROM events e WHERE e.id = ? AND " + visibleActivity, [String(id)]).isEmpty
+    }
+    /// Hide settled history, including rows beyond the latest page. Never change event disposition.
+    @discardableResult public func clearIncomingActivity() throws -> Int {
+        try db.transaction {
+            try db.execute("INSERT INTO activity_hidden_events(event_id) SELECT id FROM events WHERE disposition IN ('routed','created','ignored') ON CONFLICT(event_id) DO NOTHING")
+            let count = db.changes
+            if count > 0 { try log(taskID: nil, kind: "activity.cleared", detail: "\(count) history entries hidden; tasks, source identities, and pending attention retained") }
+            return count
+        }
+    }
+    public func hideIncomingActivity(_ id: Int64) throws {
+        try db.transaction {
+            let event = try source(id)
+            guard [.routed, .created, .ignored].contains(event.disposition) else { throw ManagerError.conflict("This message still needs review or attention; answer, retry, or ignore it first") }
+            try db.execute("INSERT INTO activity_hidden_events(event_id) VALUES (?) ON CONFLICT DO NOTHING", [String(id)])
+        }
+    }
+    public func revealIncomingActivity(_ id: Int64) throws {
+        try db.execute("DELETE FROM activity_hidden_events WHERE event_id = ?", [String(id)])
+    }
+    @discardableResult public func restoreIncomingActivity() throws -> Int {
+        try db.transaction {
+            try db.execute("DELETE FROM activity_hidden_events")
+            let count = db.changes
+            if count > 0 { try log(taskID: nil, kind: "activity.restored", detail: "\(count) history entries restored") }
+            return count
+        }
+    }
+
     public func taskInfo(_ taskID: String) throws -> TaskInfo {
         try db.transaction(readOnly: true) {
             let task = try task(taskID)
@@ -166,7 +204,7 @@ extension Store {
         return try rows.prefix(64).map { row in
             let task = try task(row["id"]!)
             let recent = try db.query("SELECT kind, text FROM agent_output WHERE task_id = ? AND kind IN ('assistant','user') ORDER BY sequence DESC LIMIT 4", [task.id]).reversed().map {
-                "\($0["kind"]!): \(String($0["text"]!.prefix(1500)))"
+                ($0["kind"] == "assistant" ? "Assistant report (not user approval of implementation choices): " : "user: ") + String($0["text"]!.prefix(1500))
             }
             let resolutions = try db.query("SELECT c.clarification FROM events e JOIN event_context c ON c.event_id = e.id WHERE e.task_id = ? AND e.disposition IN ('routed','ignored') AND c.clarification IS NOT NULL ORDER BY e.id DESC LIMIT 8", [task.id]).reversed().map {
                 "User resolution of source question: " + String($0["clarification"]!.prefix(4000))
@@ -181,7 +219,11 @@ extension Store {
     /// Decision, new task/message, learned association, and journal entry commit together.
     @discardableResult public func applyTriage(eventID: Int64, decision: TriageDecision) throws -> Bool {
         try decision.validate()
-        return try db.transaction {
+        return try db.transaction { try applyValidatedTriage(eventID: eventID, decision: decision) }
+    }
+
+    /// Caller owns the transaction; shared with explicit source corrections.
+    func applyValidatedTriage(eventID: Int64, decision: TriageDecision) throws -> Bool {
             let event = try source(eventID)
             guard event.disposition == .triaging else { return false }
             var destinationRepository = event.repository
@@ -197,6 +239,9 @@ extension Store {
                 }
                 guard let session = try agentSession(taskID: id), (event.repository.isEmpty || session.repository == event.repository) else {
                     throw ManagerError.conflict("Master selected an unavailable task or a different repository")
+                }
+                guard decision.replyRequested != true || session.purpose == .implementation else {
+                    throw ManagerError.invalid("Mixed work and reply requests must route to an implementation task")
                 }
                 destinationRepository = session.repository
                 try validateSourceLink(event, targetID: id)
@@ -214,7 +259,7 @@ extension Store {
                 try validateSourceLink(event, targetID: id)
                 try db.execute("UPDATE events SET task_id = ? WHERE id = ?", [id, String(eventID)])
                 try db.execute("UPDATE event_context SET repository = ? WHERE event_id = ?", [destinationRepository, String(eventID)])
-                try holdSource(eventID, reason: "Instruction or approach conflict: " + decision.reason, question: decision.question!)
+                try holdSource(eventID, reason: "Explicit requirement conflict: " + decision.reason, question: decision.question!)
                 return true
             case .investigate:
                 if let related = decision.taskID {
@@ -273,10 +318,10 @@ extension Store {
             let disposition = decision.action == .route ? "routed" : (decision.action == .create || decision.action == .investigate) ? "created" : "ignored"
             try db.execute("UPDATE event_context SET repository = ? WHERE event_id = ?", [destinationRepository, String(eventID)])
             try db.execute("UPDATE events SET disposition = ?, task_id = ? WHERE id = ?", [disposition, targetID, String(eventID)])
-            try db.execute("UPDATE event_context SET reason = ?, question = NULL, message_id = ?, last_error = NULL WHERE event_id = ?", [decision.reason, messageID, String(eventID)])
+            let replyRequested = decision.replyRequested == true && [.route, .create].contains(decision.action)
+            try db.execute("UPDATE event_context SET reason = ?, question = NULL, message_id = ?, last_error = NULL, reply_requested = ? WHERE event_id = ?", [decision.reason, messageID, replyRequested ? "1" : "0", String(eventID)])
             try log(taskID: targetID, kind: "triage.\(disposition)", detail: "\(eventID): \(decision.reason)")
             return true
-        }
     }
 
     public func answerSource(eventID: Int64, text: String, expectedAttempt: Int? = nil, expectedQuestion: String? = nil) throws {

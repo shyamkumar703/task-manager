@@ -35,4 +35,6 @@ public struct SlackWorkspace: Codable, Sendable, Identifiable {
     public let lastSuccess: Double?
     public let lastError: String?
     public let failures: Int
+    public let pollIntervalSeconds: Int?
+    public var intervalSeconds: Int { pollIntervalSeconds ?? 60 }
 }

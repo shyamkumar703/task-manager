@@ -7,7 +7,7 @@ extension Store {
         let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
         guard parts.count == 2, parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && $0.allSatisfy(allowed.contains) }),
               !author.isEmpty, author.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }),
-              (10...86400).contains(intervalSeconds) else { throw ManagerError.invalid("Use OWNER/REPO, a GitHub login, and a poll interval of 10...86400 seconds") }
+              (1...86400).contains(intervalSeconds) else { throw ManagerError.invalid("Use OWNER/REPO, a GitHub login, and a poll interval of 1...86400 seconds") }
         let scope = try sourceRepository(localRepository)
         let slug = repository.lowercased()
         return try db.transaction {
@@ -31,7 +31,7 @@ extension Store {
     }
 
     public func setGitHubSourceInterval(_ id: String, seconds: Int) throws {
-        guard (10...86400).contains(seconds) else { throw ManagerError.invalid("Interval must be 10...86400 seconds") }
+        guard (1...86400).contains(seconds) else { throw ManagerError.invalid("Interval must be 1...86400 seconds") }
         try db.execute("UPDATE github_sources SET interval_seconds = ?, next_poll = 0 WHERE id = ?", [String(seconds), id])
         guard db.changes == 1 else { throw ManagerError.notFound("Unknown GitHub source") }
     }

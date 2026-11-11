@@ -8,7 +8,7 @@ extension Store {
         }
         try requireText(workspaceName, name: "Workspace name")
         try requireText(channelName, name: "Conversation name")
-        guard (10...86400).contains(intervalSeconds) else { throw ManagerError.invalid("Interval must be 10...86400 seconds") }
+        guard (1...86400).contains(intervalSeconds) else { throw ManagerError.invalid("Interval must be 1...86400 seconds") }
         let scope = repository.isEmpty ? "" : try sourceRepository(repository)
         let id = "slack:\(workspaceID):\(channelID)"
         return try db.transaction {
@@ -31,7 +31,7 @@ extension Store {
         guard db.changes == 1 else { throw ManagerError.notFound("Unknown Slack source") }
     }
     public func setSlackSourceInterval(_ id: String, seconds: Int) throws {
-        guard (10...86400).contains(seconds) else { throw ManagerError.invalid("Interval must be 10...86400 seconds") }
+        guard (1...86400).contains(seconds) else { throw ManagerError.invalid("Interval must be 1...86400 seconds") }
         try db.execute("UPDATE slack_sources SET interval_seconds = ?, next_poll = 0 WHERE id = ?", [String(seconds), id])
         guard db.changes == 1 else { throw ManagerError.notFound("Unknown Slack source") }
     }

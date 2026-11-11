@@ -2,6 +2,7 @@ import CodexTransport
 import Foundation
 import GitHubIntegration
 import TaskManagerCore
+import TaskManagerPersistence
 
 public struct PRSelection: Codable, Sendable {
     public let number: Int?
@@ -14,9 +15,11 @@ public protocol PRSelecting: Sendable {
 
 /// Semantic selection is grounded in PRs actually returned by GitHub, never guessed numbers.
 public struct CodexPRSelector: PRSelecting {
-    public init() {}
+    private let store: Store?
+    public init(store: Store? = nil) { self.store = store }
     public func select(source: IncomingSource, goal: String?, tasks: [TriageCandidate], pulls: [GitHubPullRequest]) async throws -> PRSelection {
-        let connection = CodexConnection()
+        let base = CodexConnection()
+        let connection: any AgentConnection = store.map { UsageTrackingConnection(base: base, store: $0, role: "discovery", sourceEventID: source.id) } ?? base
         do {
             let selection = try await withThrowingTaskGroup(of: PRSelection.self) { group in
                 group.addTask { try await self.run(connection: connection, source: source, goal: goal, tasks: tasks, pulls: pulls) }
@@ -29,7 +32,7 @@ public struct CodexPRSelector: PRSelecting {
             return selection
         } catch { await connection.stop(); throw error }
     }
-    private func run(connection: CodexConnection, source: IncomingSource, goal: String?, tasks: [TriageCandidate], pulls: [GitHubPullRequest]) async throws -> PRSelection {
+    private func run(connection: any AgentConnection, source: IncomingSource, goal: String?, tasks: [TriageCandidate], pulls: [GitHubPullRequest]) async throws -> PRSelection {
         try await connection.connect()
         let instructions = """
         Identify which discovered pull request the user is asking about. This is a read-only selection;

@@ -89,7 +89,7 @@ final class Database {
     private func migrate() throws {
         try transaction {
             let version = try query("PRAGMA user_version").first?["user_version"] ?? "0"
-            guard ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"].contains(version) else {
+            guard ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17"].contains(version) else {
                 throw ManagerError.storage("Database schema \(version) is newer than this application")
             }
             if version == "0" {
@@ -208,7 +208,7 @@ final class Database {
                 try execute("CREATE TABLE IF NOT EXISTS user_actions (id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id), source_event_id INTEGER NOT NULL REFERENCES events(id), target TEXT NOT NULL, body TEXT NOT NULL, context TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','done','dismissed')))")
                 try execute("PRAGMA user_version = 9")
             }
-            if version != "10" {
+            if Int(version)! < 10 {
                 let sourceColumns = try query("PRAGMA table_info(slack_sources)").compactMap { $0["name"] }
                 if !sourceColumns.contains("channel_topic") { try execute("ALTER TABLE slack_sources ADD COLUMN channel_topic TEXT") }
                 if !sourceColumns.contains("channel_purpose") { try execute("ALTER TABLE slack_sources ADD COLUMN channel_purpose TEXT") }
@@ -219,10 +219,80 @@ final class Database {
                 try execute("UPDATE slack_workspaces SET next_discovery = 0")
                 try execute("PRAGMA user_version = 10")
             }
-            if version != "11" {
+            if Int(version)! < 11 {
                 let columns = try query("PRAGMA table_info(event_context)").compactMap { $0["name"] }
                 if !columns.contains("github_context") { try execute("ALTER TABLE event_context ADD COLUMN github_context TEXT") }
                 try execute("PRAGMA user_version = 11")
+            }
+            if Int(version)! < 12 {
+                try execute("""
+                    CREATE TABLE IF NOT EXISTS usage_threads (
+                        thread_id TEXT PRIMARY KEY, task_id TEXT REFERENCES tasks(id),
+                        source_event_id INTEGER REFERENCES events(id), role TEXT NOT NULL,
+                        model TEXT NOT NULL, provider TEXT NOT NULL, effort TEXT, service_tier TEXT,
+                        counters TEXT, resumed INTEGER NOT NULL DEFAULT 0
+                    )
+                    """)
+                try execute("""
+                    CREATE TABLE IF NOT EXISTS usage_turns (
+                        thread_id TEXT NOT NULL REFERENCES usage_threads(thread_id), turn_id TEXT NOT NULL,
+                        model TEXT NOT NULL, provider TEXT NOT NULL, effort TEXT,
+                        input_tokens INTEGER NOT NULL, cached_tokens INTEGER NOT NULL, cache_write_tokens INTEGER NOT NULL,
+                        output_tokens INTEGER NOT NULL, reasoning_tokens INTEGER NOT NULL, total_tokens INTEGER NOT NULL,
+                        price TEXT, unpriceable INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL,
+                        PRIMARY KEY(thread_id, turn_id, model, provider)
+                    )
+                    """)
+                try execute("CREATE TABLE IF NOT EXISTS usage_prices (model TEXT NOT NULL, provider TEXT NOT NULL, price TEXT NOT NULL, PRIMARY KEY(model, provider))")
+                try execute("PRAGMA user_version = 12")
+            }
+            if Int(version)! < 13 {
+                if !(try query("PRAGMA table_info(event_context)").compactMap { $0["name"] }).contains("reply_requested") {
+                    try execute("ALTER TABLE event_context ADD COLUMN reply_requested INTEGER NOT NULL DEFAULT 0 CHECK(reply_requested IN (0,1))")
+                }
+                // A continuing implementation task can answer multiple independent sources.
+                try execute("""
+                    CREATE TABLE user_actions_v13 (
+                        id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),
+                        source_event_id INTEGER NOT NULL REFERENCES events(id), target TEXT NOT NULL,
+                        body TEXT NOT NULL, context TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','done','dismissed')),
+                        UNIQUE(task_id, source_event_id)
+                    )
+                    """)
+                try execute("INSERT INTO user_actions_v13 SELECT * FROM user_actions")
+                try execute("DROP TABLE user_actions")
+                try execute("ALTER TABLE user_actions_v13 RENAME TO user_actions")
+                try execute("PRAGMA user_version = 13")
+            }
+            if Int(version)! < 14 {
+                try execute("CREATE TABLE IF NOT EXISTS slack_user_names (workspace_id TEXT NOT NULL, user_id TEXT NOT NULL, name TEXT, next_lookup REAL NOT NULL DEFAULT 0, PRIMARY KEY(workspace_id, user_id))")
+                try execute("PRAGMA user_version = 14")
+            }
+            if Int(version)! < 15 {
+                try execute("CREATE TABLE IF NOT EXISTS activity_hidden_events (event_id INTEGER PRIMARY KEY REFERENCES events(id))")
+                try execute("PRAGMA user_version = 15")
+            }
+            if Int(version)! < 16 {
+                if !(try query("PRAGMA table_info(slack_workspaces)").compactMap { $0["name"] }).contains("poll_interval_seconds") {
+                    try execute("ALTER TABLE slack_workspaces ADD COLUMN poll_interval_seconds INTEGER NOT NULL DEFAULT 60 CHECK(poll_interval_seconds BETWEEN 10 AND 86400)")
+                }
+                try execute("PRAGMA user_version = 16")
+            }
+            if Int(version)! < 17 {
+                // SQLite cannot alter a CHECK constraint in place. Preserve all workspace state.
+                try execute("""
+                    CREATE TABLE slack_workspaces_v17 (
+                        id TEXT PRIMARY KEY, name TEXT NOT NULL, user_id TEXT NOT NULL,
+                        next_discovery REAL NOT NULL DEFAULT 0, last_success REAL, last_error TEXT,
+                        failures INTEGER NOT NULL DEFAULT 0,
+                        poll_interval_seconds INTEGER NOT NULL DEFAULT 60 CHECK(poll_interval_seconds BETWEEN 1 AND 86400)
+                    )
+                    """)
+                try execute("INSERT INTO slack_workspaces_v17 SELECT id, name, user_id, next_discovery, last_success, last_error, failures, poll_interval_seconds FROM slack_workspaces")
+                try execute("DROP TABLE slack_workspaces")
+                try execute("ALTER TABLE slack_workspaces_v17 RENAME TO slack_workspaces")
+                try execute("PRAGMA user_version = 17")
             }
         }
     }

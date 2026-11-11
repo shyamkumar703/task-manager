@@ -20,6 +20,7 @@ extension Store {
             let message = try insertMessage(taskID: child.id, body: sourceMessage(integration: event.integration, url: event.url, body: event.body, clarification: event.clarification, context: context))
             try db.execute("UPDATE events SET disposition = 'created', task_id = ? WHERE id = ?", [child.id, String(id)])
             try db.execute("UPDATE event_context SET repository = ?, message_id = ?, reason = 'Independent source-context exploration requested by user', question = NULL, last_error = NULL WHERE event_id = ?", [repository, message, String(id)])
+            try db.execute("UPDATE user_actions SET status = 'dismissed' WHERE source_event_id = ? AND task_id != ? AND status = 'open'", [String(id), child.id])
             try log(taskID: child.id, kind: "source.reinvestigated", detail: "Source \(id); previous target \(event.taskID ?? "none") retained in history")
             return child.id
         }
@@ -46,9 +47,69 @@ extension Store {
             guard let event = try db.query("SELECT id, url FROM events WHERE task_id = ? AND disposition = 'created' ORDER BY id LIMIT 1", [taskID]).first else { throw ManagerError.notFound("Investigation has no source message") }
             let provenance = try output(taskID: taskID, itemID: "inspection-context")?.text ?? "Local inspection; no remote refresh was performed."
             let context = "Inspected \(session.baseRef ?? "mock snapshot") @ \(session.baseSHA ?? "mock").\n\(provenance)\n\n" + findings
-            try db.execute("INSERT INTO user_actions(id, task_id, source_event_id, target, body, context) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET body = excluded.body, context = excluded.context, status = 'open'", [UUID().uuidString, taskID, event["id"]!, event["url"]!, String(reply.prefix(65536)), String(context.prefix(65536))])
+            try db.execute("INSERT INTO user_actions(id, task_id, source_event_id, target, body, context) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(task_id, source_event_id) DO UPDATE SET body = excluded.body, context = excluded.context, status = 'open'", [UUID().uuidString, taskID, event["id"]!, event["url"]!, String(reply.prefix(65536)), String(context.prefix(65536))])
             try changeStatus(taskID, to: .completed)
             try log(taskID: taskID, kind: "user_action.ready", detail: "Suggested reply ready for source event \(event["id"]!). Nothing was sent.")
+        }
+    }
+    public func pendingSourceReplies(taskID: String) throws -> [SourceReplyRequest] {
+        try db.query("""
+            SELECT e.id, e.url, e.body FROM events e JOIN event_context c ON c.event_id = e.id
+            WHERE e.task_id = ? AND c.reply_requested = 1 AND e.disposition IN ('routed','created')
+              AND NOT EXISTS (SELECT 1 FROM user_actions a WHERE a.task_id = e.task_id AND a.source_event_id = e.id)
+            ORDER BY e.id
+            """, [taskID]).map { SourceReplyRequest(sourceEventID: Int64($0["id"]!)!, url: $0["url"]!, body: String($0["body"]!.prefix(8192))) }
+    }
+
+    /// Finish implementation and prepare source-specific drafts together. Nothing is sent.
+    public func completeImplementation(taskID: String, findings: String, sourceReplies: [SourceReply]) throws {
+        try db.transaction {
+            guard let session = try agentSession(taskID: taskID), session.purpose == .implementation,
+                  try task(taskID).status == .running else { throw ManagerError.conflict("Implementation is not running") }
+            // A source can arrive after the coordinator's pending-inbox check. Requeue atomically
+            // instead of failing because the just-finished turn could not answer that new source.
+            if !(try messages(taskID: taskID, pendingOnly: true)).isEmpty {
+                try changeStatus(taskID, to: .queued)
+                return
+            }
+            let requests = try pendingSourceReplies(taskID: taskID)
+            let requested = Set(requests.map(\.sourceEventID))
+            let supplied = Set(sourceReplies.map(\.sourceEventID))
+            guard requested == supplied, supplied.count == sourceReplies.count else {
+                throw ManagerError.invalid("Implementation must return exactly one sourceReplies draft per pending source; retry to finish the requested response")
+            }
+            for reply in sourceReplies {
+                try requireText(reply.text, name: "Suggested source reply")
+                guard reply.text.count <= 65536 else { throw ManagerError.invalid("Suggested source reply is too long") }
+                let target = requests.first { $0.sourceEventID == reply.sourceEventID }!
+                let context = "Implementation task \(taskID). Worktree: \(session.workspace ?? "not recorded").\n" + String(findings.prefix(60000))
+                try db.execute("INSERT INTO user_actions(id, task_id, source_event_id, target, body, context) VALUES (?, ?, ?, ?, ?, ?)", [UUID().uuidString, taskID, String(reply.sourceEventID), target.url, reply.text, context])
+                try log(taskID: taskID, kind: "user_action.ready", detail: "Suggested reply ready for source event \(reply.sourceEventID). Nothing was sent.")
+            }
+            try changeStatus(taskID, to: .completed)
+        }
+    }
+
+    /// Explicit correction of a finished read-only investigation into existing implementation work.
+    public func continueSource(_ eventID: Int64, in taskID: String) throws {
+        try db.transaction {
+            let event = try source(eventID)
+            if event.taskID == taskID && event.disposition == .routed { return }
+            guard let oldID = event.taskID, try agentSession(taskID: oldID)?.purpose == .exploration,
+                  [.completed, .failed, .paused].contains(try task(oldID).status) else {
+                throw ManagerError.conflict("Only a finished or paused investigation can be continued as implementation")
+            }
+            guard let session = try agentSession(taskID: taskID), session.purpose == .implementation else {
+                throw ManagerError.invalid("Choose an existing implementation task")
+            }
+            // applyTriage performs repository, archive, cancellation, and association checks.
+            try db.execute("UPDATE events SET disposition = 'triaging' WHERE id = ?", [String(eventID)])
+            let decision = TriageDecision(action: .route, taskID: taskID, reason: "User correction: inspect and fulfill the source requirement in the existing implementation task, then prepare a suggested answer", replyRequested: true)
+            try decision.validate()
+            _ = try applyValidatedTriage(eventID: eventID, decision: decision)
+            guard try source(eventID).disposition == .routed else { return }
+            try db.execute("UPDATE user_actions SET status = 'dismissed' WHERE source_event_id = ? AND task_id != ? AND status = 'open'", [String(eventID), taskID])
+            try log(taskID: taskID, kind: "source.continued", detail: "Source \(eventID); prior exploration \(oldID) retained in history")
         }
     }
     public func userActions() throws -> [UserAction] {

@@ -27,6 +27,8 @@ public struct IncomingSource: Codable, Sendable, Identifiable {
     public let messageID: String?
     public let messageDelivered: Bool?
     public let targetWorkerKind: WorkerKind?
+    /// Read-only lookup results for a bounded reconsideration before asking the user.
+    public var contextEvidence: [String]? = nil
 }
 
 public enum TriageAction: String, Codable, Sendable { case route, create, investigate, ignore, clarify, conflict }
@@ -40,13 +42,16 @@ public struct TriageDecision: Codable, Sendable {
     public let repository: String?
     public let inspectionScope: String?
     public let pullRequestNumber: Int?
+    public let replyRequested: Bool?
 
-    public init(action: TriageAction, taskID: String? = nil, goal: String? = nil, reason: String, question: String? = nil, repository: String? = nil, inspectionScope: String? = nil, pullRequestNumber: Int? = nil) {
+    public init(action: TriageAction, taskID: String? = nil, goal: String? = nil, reason: String, question: String? = nil, repository: String? = nil, inspectionScope: String? = nil, pullRequestNumber: Int? = nil, replyRequested: Bool? = nil) {
         self.action = action; self.taskID = taskID; self.goal = goal; self.reason = reason; self.question = question; self.repository = repository; self.inspectionScope = inspectionScope; self.pullRequestNumber = pullRequestNumber
+        self.replyRequested = replyRequested
     }
 
     public func validate() throws {
         try requireText(reason, name: "Decision reason")
+        guard replyRequested != true || [.route, .create, .investigate].contains(action) else { throw ManagerError.invalid("Only work decisions can request a source reply") }
         if let number = pullRequestNumber { guard action == .investigate, number > 0 else { throw ManagerError.invalid("Only investigations can select a positive PR number") } }
         guard inspectionScope == nil || (action == .investigate && ["status", "code"].contains(inspectionScope!)) else { throw ManagerError.invalid("Only investigations can select code/status inspection scope") }
         guard reason.count <= 4096 else { throw ManagerError.invalid("Decision reason is too long") }

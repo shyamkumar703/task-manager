@@ -17,6 +17,23 @@ private actor SlackFixture: SlackHTTPTransport {
     }
 }
 private func slackResponse(_ json: String) -> SlackHTTPResponse { SlackHTTPResponse(data: Data(json.utf8)) }
+
+@Test func slackRoutingLookupIsBoundedAndExcludesCurrentAndFutureMessages() async throws {
+    let transport = SlackFixture([
+        slackResponse(#"{"ok":true,"messages":[{"ts":"1.0","text":"We are discussing export","user":"U"},{"ts":"2.0","text":"Current message"},{"ts":"3.0","text":"Future message"}],"has_more":true,"response_metadata":{"next_cursor":"ignored"}}"#),
+        slackResponse(#"{"ok":true,"messages":[{"ts":"1.0","thread_ts":"1.0","text":"Thread root","user":"U"}]}"#),
+    ])
+    let client = SlackClient(token: "xoxp-fixture", transport: transport)
+    let messages = try await client.routingMessages(channel: "C", before: "2.0")
+    #expect(messages.map(\.timestamp) == ["1.0"])
+    _ = try await client.routingMessages(channel: "C", before: "2.0", thread: "1.0")
+    let requests = await transport.requests
+    #expect(requests.count == 2)
+    #expect(requests[0].url?.path == "/api/conversations.history")
+    #expect(requests[1].url?.path == "/api/conversations.replies")
+    #expect(requests[1].url?.query?.contains("ts=1.0") == true)
+    #expect(requests.allSatisfy { $0.url?.query?.contains("limit=50") == true })
+}
 private func slackRoot() throws -> String {
     let path = FileManager.default.temporaryDirectory.appendingPathComponent("slack-tests-" + UUID().uuidString).path
     try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)

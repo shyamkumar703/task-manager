@@ -8,7 +8,7 @@ struct TaskInfoSection {
 }
 
 enum TaskInfoPresentation {
-    static func sections(_ info: TaskInfo) -> [TaskInfoSection] {
+    static func sections(_ info: TaskInfo, slackNames: SlackNameDirectory = SlackNameDirectory()) -> [TaskInfoSection] {
         let task = info.task
         let creation = info.journal.first { $0.kind == "triage.created" || $0.kind == "source.reinvestigated" }
         let originatingSource = creation.flatMap { entry in
@@ -34,7 +34,7 @@ enum TaskInfoPresentation {
         for source in info.sources {
             let sameTask = source.taskID == task.id
             let delivery = !sameTask ? "Previously linked; now associated with another child" : source.messageDelivered.map { $0 ? "Accepted by child" : "Queued; not yet accepted" } ?? "Not forwarded (\(source.disposition.rawValue))"
-            var body = "\(delivery)\n\(source.url)\nSource ID: \(source.sourceID)\nAssociation: \(source.associationKey)\n\n\(source.body)"
+            var body = "\(delivery)\n\(source.url)\nSource ID: \(source.sourceID)\nAssociation: \(source.associationKey)\n\n\(slackNames.body(of: source))"
             if let reason = source.reason { body += "\n\nLatest routing decision: \(reason)" }
             if let context = source.githubContext {
                 body += "\n\nPR context: \(context.repository) #\(context.pullRequest)\nHead branch: \(context.headBranch) @ \(context.headSHA)\nCheckout: \(context.checkout ?? "Not locally checked out")\nOwning task: \(context.owningTaskID ?? "Unassigned")"
@@ -42,10 +42,14 @@ enum TaskInfoPresentation {
             if let discovery = source.githubContext?.discoveryReason { body += "\n\nPR discovery: " + discovery }
             if let evidence = source.githubContext?.liveEvidence { body += "\n\nLive GitHub evidence at \(source.githubContext?.checkedAt ?? "unknown time"):\n" + evidence }
             if let context = source.slackContext {
-                body += "\n\nContext: \(context.workspaceName) / #\(context.channelName)\nTopic: \(context.topic ?? "—")\nPurpose: \(context.purpose ?? "—")"
+                let channel = slackNames.channel(context.channelID, workspace: slackNames.workspace(of: source) ?? "", fallback: context.channelName)
+                body += "\n\nContext: \(context.workspaceName) / \(channel)\nTopic: \(context.topic ?? "—")\nPurpose: \(context.purpose ?? "—")"
                 for (label, messages) in [("Preceding channel messages", context.precedingMessages), ("Thread messages", context.threadMessages)] where !messages.isEmpty {
                     body += "\n\n" + label
-                    for message in messages { body += "\n[\(message.timestamp) · \(message.author)] \(message.text)" }
+                    for message in messages {
+                        let workspace = slackNames.workspace(of: source) ?? ""
+                        body += "\n[\(message.timestamp) · \(slackNames.user(message.author, workspace: workspace))] \(slackNames.render(message.text, workspace: workspace))"
+                    }
                 }
                 for evidence in context.projectHistory {
                     body += "\n\nPrior project context: \(evidence.repository)\n\(evidence.message)\n\(evidence.reason)"
@@ -58,7 +62,7 @@ enum TaskInfoPresentation {
         }
         let sourceMessages = Set(info.sources.compactMap(\.messageID))
         for message in info.messages where !sourceMessages.contains(message.id) {
-            result.append(.init(title: "TASK MESSAGE · \(message.delivered ? "ACCEPTED" : "QUEUED")", text: message.body, style: message.delivered ? 0 : 4))
+            result.append(.init(title: "TASK MESSAGE · \(message.delivered ? "ACCEPTED" : "QUEUED")", text: slackNames.envelope(message.body), style: message.delivered ? 0 : 4))
         }
         for question in info.questions {
             result.append(.init(title: question.answer == nil ? "QUESTION · AWAITING ANSWER" : "QUESTION · ANSWERED", text: question.prompt + "\n\nAnswer: " + (question.answer ?? "Pending"), style: question.answer == nil ? 4 : 0))

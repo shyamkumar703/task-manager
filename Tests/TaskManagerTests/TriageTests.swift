@@ -175,12 +175,46 @@ private actor ScriptedTriage: TriageEngine {
     let decisions: [TriageDecision]
     var calls = 0
     var lastCandidates: [TriageCandidate] = []
+    var lastEvidence: [String]?
     init(_ decisions: [TriageDecision]) { self.decisions = decisions }
     func decide(event: IncomingSource, candidates: [TriageCandidate]) async throws -> TriageDecision {
         lastCandidates = candidates
+        lastEvidence = event.contextEvidence
         let result = decisions[min(calls, decisions.count - 1)]
         calls += 1
         return result
+    }
+}
+
+private actor FakeContextGatherer: TriageContextGathering {
+    var calls = 0
+    func gather(event: IncomingSource, candidates: [TriageCandidate]) async throws -> [String] {
+        calls += 1
+        return ["Slack thread identifies the export feature; GitHub PR #17 implements export."]
+    }
+}
+
+@Test func ambiguousSourceChecksConnectionsBeforeAskingAndReconsidersOnlyOnce() async throws {
+    let root = try triageRoot()
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    for resolved in [true, false] {
+        let store = try Store(path: ":memory:")
+        let source = SourceEvent(integration: "slack", sourceID: "T:C:12.0", revision: "1", associationKey: "slack:T:C:thread:12.0", body: "Fix that export", url: "slack://message")
+        try await store.ingest([source], repository: root)
+        let id = try #require(await store.sources().first?.id)
+        let question = TriageDecision(action: .clarify, reason: "Missing feature context", question: "Which feature?")
+        let engine = ScriptedTriage([question, resolved ? .init(action: .create, goal: "Fix export", reason: "Thread and PR identify export") : question])
+        let gatherer = FakeContextGatherer()
+        let triage = SourceTriage(store: store, engine: engine, contextGatherer: gatherer)
+        try await eventually {
+            try await triage.tick()
+            return try await store.source(id).disposition == (resolved ? .created : .waitingForUser)
+        }
+        #expect(await gatherer.calls == 1)
+        #expect(await engine.calls == 2)
+        #expect(await engine.lastEvidence?.first?.contains("PR #17") == true)
+        #expect(try await store.tasks().count == (resolved ? 1 : 0))
+        await triage.shutdown()
     }
 }
 

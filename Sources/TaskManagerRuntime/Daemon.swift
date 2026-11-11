@@ -5,7 +5,7 @@ import TaskManagerCore
 import TaskManagerPersistence
 
 public enum Daemon {
-    private static let compatibilityVersion = "task-manager-17"
+    private static let compatibilityVersion = "task-manager-24"
     public static func requestStop(stateDirectory: String) throws {
         try Data().write(to: URL(fileURLWithPath: stateDirectory).appendingPathComponent("stop-request"), options: .atomic)
     }
@@ -25,6 +25,7 @@ public enum Daemon {
         let coordinator = Coordinator(store: store, stateDirectory: stateDirectory)
         let polling = GitHubPollingScheduler(store: store, client: try GitHubClient())
         let slackPolling = SlackPollingScheduler(store: store, stateDirectory: stateDirectory)
+        let slackNames = SlackNameResolver(store: store)
         let oldTerm = signal(SIGTERM, SIG_IGN)
         let oldInt = signal(SIGINT, SIG_IGN)
         let sources = [SIGTERM, SIGINT].map { number in
@@ -42,15 +43,18 @@ public enum Daemon {
             while !Task.isCancelled && !FileManager.default.fileExists(atPath: stopFile.path) {
                 try await polling.tick()
                 try await slackPolling.tick()
+                await slackNames.tick()
                 try await coordinator.tick()
                 try await Task.sleep(for: .milliseconds(100))
             }
         } catch {
+            await slackNames.shutdown()
             await slackPolling.shutdown()
             await polling.shutdown()
             await coordinator.shutdown()
             throw error
         }
+        await slackNames.shutdown()
         await slackPolling.shutdown()
         await polling.shutdown()
         await coordinator.shutdown()

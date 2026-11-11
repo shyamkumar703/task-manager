@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 1060" role="img" aria-labelledby="title desc">
+<title id="title">Task manager architecture</title><desc id="desc">Slack and GitHub events enter a durable triage workflow. A local Swift coordinator validates model decisions and manages implementation and exploration workers. SQLite connects the user interface, durable inboxes, questions, outputs, and worker sessions.</desc>
+<defs><marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4" orient="auto-start-reverse"><path d="M0,0 L8,4 L0,8" fill="#64748b"/></marker></defs>
+<rect width="1400" height="1060" fill="#f8fafc"/>
+<style>text{font-family:Arial,sans-serif;fill:#172033}.heading{font-size:29px;font-weight:700}.sub{font-size:15px;fill:#526079}.label{font-size:16px;font-weight:700}.body{font-size:14px;fill:#526079}.edge{fill:none;stroke:#64748b;stroke-width:2;marker-end:url(#arrow)}</style>
+<text class="heading" x="45" y="53">Task manager · architecture</text>
+<text class="sub" x="45" y="80">Current implementation · local orchestration, durable state, model-assisted decisions</text>
+<rect x="335" y="110" width="660" height="645" rx="20" fill="#eef4ff" stroke="#c5d4ed"/>
+<text class="label" x="360" y="144">Coordinator daemon · Swift actors</text>
+<rect x="40" y="180" width="245" height="105" rx="12" fill="#fff" stroke="#cbd5e1"/>
+<text class="label" x="58" y="209">Slack + GitHub</text>
+<text class="body" x="58" y="234">Authenticated source reads</text>
+<text class="body" x="58" y="255">Channel / PR discovery</text>
+<rect x="365" y="180" width="275" height="105" rx="12" fill="#fff" stroke="#cbd5e1"/>
+<text class="label" x="383" y="209">Polling + discovery</text>
+<text class="body" x="383" y="234">Independent async jobs</text>
+<text class="body" x="383" y="255">Backoff + checkpoints</text>
+<rect x="365" y="325" width="275" height="95" rx="12" fill="#fff" stroke="#cbd5e1"/>
+<text class="label" x="383" y="354">Normalize + deduplicate</text>
+<text class="body" x="383" y="379">Stable source ID + revision</text>
+<rect x="365" y="460" width="275" height="100" rx="12" fill="#fff" stroke="#cbd5e1"/>
+<text class="label" x="383" y="489">Codex master triage</text>
+<text class="body" x="383" y="514">Structured decision proposal</text>
+<text class="body" x="383" y="535">No shell / apps / web tools</text>
+<rect x="700" y="440" width="265" height="130" rx="12" fill="#fff" stroke="#cbd5e1"/>
+<text class="label" x="718" y="469">Gather more context</text>
+<text class="body" x="718" y="494">Slack history + recent PRs</text>
+<text class="body" x="718" y="515">On provisional clarification</text>
+<text class="body" x="718" y="536">Reconsider once</text>
+<rect x="365" y="605" width="275" height="105" rx="12" fill="#fff" stroke="#cbd5e1"/>
+<text class="label" x="383" y="634">Validate + apply</text>
+<text class="body" x="383" y="659">Atomic state transitions</text>
+<text class="body" x="383" y="680">Route, create, investigate, ask</text>
+<rect x="1040" y="180" width="315" height="115" rx="12" fill="#fff" stroke="#cbd5e1"/>
+<text class="label" x="1058" y="209">User · TUI / CLI</text>
+<text class="body" x="1058" y="234">Observe output, answer questions</text>
+<text class="body" x="1058" y="255">Pause / resume / manual handoff</text>
+<rect x="1040" y="450" width="315" height="175" rx="12" fill="#ecfdf5" stroke="#cbd5e1"/>
+<text class="label" x="1058" y="479">Durable SQLite · WAL</text>
+<text class="body" x="1058" y="504">Events + task state</text>
+<text class="body" x="1058" y="525">Inboxes + pending questions</text>
+<text class="body" x="1058" y="546">Agent sessions + output</text>
+<text class="body" x="1058" y="567">Decision and activity journal</text>
+<rect x="365" y="795" width="600" height="90" rx="12" fill="#fff" stroke="#cbd5e1"/>
+<text class="label" x="383" y="824">Worker lifecycle + inbox delivery</text>
+<text class="body" x="383" y="849">Claim / resume / steer / interrupt · two worker slots by default</text>
+<rect x="365" y="930" width="285" height="105" rx="12" fill="#fff" stroke="#cbd5e1"/>
+<text class="label" x="383" y="959">Implementation worker</text>
+<text class="body" x="383" y="984">Codex thread + git worktree</text>
+<text class="body" x="383" y="1005">Edit / test / requested push</text>
+<rect x="700" y="930" width="285" height="105" rx="12" fill="#fff" stroke="#cbd5e1"/>
+<text class="label" x="718" y="959">Exploration worker</text>
+<text class="body" x="718" y="984">Read-only inspection</text>
+<text class="body" x="718" y="1005">Fresh PR evidence + head code</text>
+<path class="edge" d="M285 230 H365"/>
+<path class="edge" d="M500 285 V325"/>
+<path class="edge" d="M500 420 V460"/>
+<path class="edge" d="M640 485 H700"/>
+<path class="edge" d="M700 540 H640"/>
+<text class="body" x="648" y="531">Evidence</text>
+<path class="edge" d="M500 560 V605"/>
+<path class="edge" d="M500 710 V795"/>
+<path class="edge" d="M500 885 V930"/>
+<path class="edge" d="M820 885 V930"/>
+<path class="edge" d="M1195 295 V450"/>
+<text class="body" x="1050" y="370">Read state / submit commands</text>
+<path class="edge" d="M640 370 H1015 V475 H1040"/>
+<text class="body" x="820" y="359">Persist events</text>
+<path class="edge" d="M640 660 H1015 V600 H1040"/>
+<text class="body" x="750" y="686">Commit validated decision</text>
+<path class="edge" d="M965 835 H1195 V625"/>
+<text class="body" x="1015" y="777">Session / inbox / output state</text>
+<path class="edge" d="M840 440 V305 H700 V230 H640" stroke-dasharray="6 5"/>
+<text class="body" x="710" y="322">Read connected sources</text>
+<text class="body" x="43" y="880">Worktrees isolate code changes.</text><text class="body" x="43" y="904">They are not security sandboxes.</text>
+</svg>

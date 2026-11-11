@@ -44,14 +44,20 @@ struct AgentResult: Codable {
     let status: String
     let text: String
     let reply: String?
-    init(status: String, text: String, reply: String? = nil) { self.status = status; self.text = text; self.reply = reply }
+    let sourceReplies: [SourceReply]?
+    init(status: String, text: String, reply: String? = nil, sourceReplies: [SourceReply]? = nil) { self.status = status; self.text = text; self.reply = reply; self.sourceReplies = sourceReplies }
     static let schema: JSONValue = .object([
         "type": .string("object"), "additionalProperties": .bool(false),
         "properties": .object([
             "status": .object(["type": .string("string"), "enum": .array([.string("completed"), .string("question")])]),
             "text": .object(["type": .string("string")]),
             "reply": .object(["type": .array([.string("string"), .string("null")])]),
+            "sourceReplies": .object(["type": .string("array"), "items": .object([
+                "type": .string("object"), "additionalProperties": .bool(false),
+                "properties": .object(["sourceEventID": .object(["type": .string("integer")]), "text": .object(["type": .string("string")])]),
+                "required": .array([.string("sourceEventID"), .string("text")]),
+            ])]),
         ]),
-        "required": .array([.string("status"), .string("text"), .string("reply")]),
+        "required": .array([.string("status"), .string("text"), .string("reply"), .string("sourceReplies")]),
     ])
 }
